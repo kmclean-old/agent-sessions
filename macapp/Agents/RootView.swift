@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var shortcuts: ShortcutPreferences
+    @EnvironmentObject private var shortcutCapture: ShortcutCapture
     @ObservedObject var store: AppStore
     let center: TerminalCenter
     @ObservedObject var overlays: OverlayCenter
@@ -115,7 +116,7 @@ struct RootView: View {
             store.setAppActive(false)
         }
         .sheet(isPresented: $uiState.showShortcutHelp) {
-            ShortcutHelpView()
+            ShortcutHelpView(preferences: shortcuts, capture: shortcutCapture)
         }
         .sheet(
             isPresented: Binding(

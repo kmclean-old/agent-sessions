@@ -1,81 +1,130 @@
 import SwiftUI
 
-/// Keyboard shortcut help, generated from the action catalog and the live
-/// preferences so menu labels and this sheet always agree.
+/// The existing help sheet doubles as a shortcut editor. All changes belong
+/// to a draft until Save, including clears and restores.
 struct ShortcutHelpView: View {
-    @EnvironmentObject private var shortcuts: ShortcutPreferences
-    /// Section order for the sheet. Every `AppAction.helpGroup` value must
-    /// appear here or its rows would silently vanish from the sheet —
-    /// internal (not private) so `KeymapTests` can enforce exactly that.
     static let groupOrder = ["Sessions", "Panes", "Workspaces", "Projects", "Window", "Help"]
 
-    private struct Row: Identifiable {
-        let id: AppAction
-        let title: String
-        let shortcut: String
-    }
-
-    private func rows(in group: String) -> [Row] {
-        AppAction.allCases.filter { $0.helpGroup == group }.map { action in
-            Row(id: action, title: action.helpTitle, shortcut: shortcuts.bindings[action]?.displayString ?? "—")
-        }
-    }
-
+    @ObservedObject private var preferences: ShortcutPreferences
+    @ObservedObject private var capture: ShortcutCapture
+    @StateObject private var editor: ShortcutEditor
     @Environment(\.dismiss) private var dismiss
 
+    init(preferences: ShortcutPreferences, capture: ShortcutCapture) {
+        self.preferences = preferences
+        self.capture = capture
+        _editor = StateObject(wrappedValue: ShortcutEditor(bindings: preferences.bindings))
+    }
+
     var body: some View {
+        let errors = editor.errors
         VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Keyboard Shortcuts")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("Click a shortcut, then press a new combination including Command (⌘).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(24)
+
+            Divider()
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    Text("Keyboard Shortcuts")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-
+                VStack(alignment: .leading, spacing: 24) {
                     ForEach(Self.groupOrder, id: \.self) { group in
-                        let groupRows = rows(in: group)
-                        if !groupRows.isEmpty {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(group)
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.secondary)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    ForEach(groupRows) { row in
-                                        HStack {
-                                            Text(row.title)
-                                            Spacer(minLength: 32)
-                                            Text(row.shortcut)
-                                                .foregroundStyle(.secondary)
-                                                .monospaced()
-                                        }
-                                    }
-                                }
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(group)
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                            ForEach(AppAction.allCases.filter { $0.helpGroup == group }, id: \.self) { action in
+                                row(action, error: errors[action])
                             }
                         }
                     }
                 }
-                .padding(32)
+                .padding(24)
             }
 
             Divider()
 
-            HStack {
-                Spacer()
-                // SwiftUI sheets only get Esc-dismiss when their content
-                // contains a button with `.keyboardShortcut(.cancelAction)`
-                // — there's no other way to opt a sheet into it. This button
-                // exists to satisfy that requirement; it deliberately does
-                // NOT go through Keymap/ShortcutRouter, because it's
-                // sheet-contextual (only meaningful while this sheet is
-                // open), not a global app shortcut.
-                Button("Close") {
-                    dismiss()
+            VStack(alignment: .leading, spacing: 12) {
+                if !errors.isEmpty {
+                    Text("Resolve shortcut conflicts before saving.")
+                        .font(.callout)
+                        .foregroundStyle(.red)
                 }
-                .keyboardShortcut(.cancelAction)
+                HStack {
+                    Button("Restore Defaults") {
+                        capture.end()
+                        editor.bindings = Keymap.standard
+                    }
+                    .disabled(editor.bindings == Keymap.standard)
+                    Spacer()
+                    Button("Cancel") {
+                        guard !capture.suppresses(NSApp.currentEvent) else { return }
+                        capture.end()
+                        dismiss()
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    Button("Save") {
+                        guard !capture.suppresses(NSApp.currentEvent) else { return }
+                        if preferences.save(editor.bindings) {
+                            capture.end()
+                            dismiss()
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!errors.isEmpty || capture.action != nil)
+                }
             }
             .padding(16)
         }
-        .frame(minWidth: 440, minHeight: 380)
+        .frame(width: 640, height: 650)
+        .onChange(of: capture.action) { _, _ in editor.clearRecordingError() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            capture.end()
+        }
+        .onDisappear { capture.end() }
+    }
+
+    private func row(_ action: AppAction, error: String?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(action.helpTitle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ShortcutRecorder(action: action, shortcut: editor.bindings[action], capture: capture) { event in
+                    editor.record(event, for: action, capture: capture)
+                }
+                .frame(width: 156, height: 28)
+                Button {
+                    capture.end()
+                    editor.bindings[action] = nil
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .disabled(editor.bindings[action] == nil)
+                .help("Clear shortcut")
+                .accessibilityLabel("Clear \(action.helpTitle) shortcut")
+                Button {
+                    capture.end()
+                    editor.reset(action)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .disabled(editor.bindings[action] == Keymap.standard[action])
+                .help("Restore default shortcut")
+                .accessibilityLabel("Restore \(action.helpTitle) shortcut")
+            }
+            if let message = (capture.action == action ? editor.recordingError : nil) ?? error {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

@@ -49,6 +49,7 @@ final class AppActions {
     /// directly) so tests can drive the dedup in `perform` without a real
     /// event stream.
     private let currentEvent: () -> NSEvent?
+    private let suppressShortcut: (NSEvent) -> Bool
     private var lastKeyDispatch: (action: AppAction, timestamp: TimeInterval)?
 
     init(
@@ -58,7 +59,8 @@ final class AppActions {
         reviewSessions: @escaping () -> Set<String> = { [] },
         dialogs: any DialogPresenting = LiveDialogPresenter(),
         present: @escaping (@escaping () -> Void) -> Void = { work in DispatchQueue.main.async(execute: work) },
-        currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent }
+        currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent },
+        suppressShortcut: @escaping (NSEvent) -> Bool = { _ in false }
     ) {
         self.store = store
         self.uiState = uiState
@@ -67,22 +69,17 @@ final class AppActions {
         self.dialogs = dialogs
         self.present = present
         self.currentEvent = currentEvent
+        self.suppressShortcut = suppressShortcut
     }
 
     /// Runs `action` at most once per originating keystroke.
     ///
-    /// A ⌘-shortcut in this app is dispatched by two entirely independent
-    /// mechanisms: `ShortcutRouter`'s local `NSEvent` monitor, and the menu
-    /// item's own key equivalent, which `.keymapShortcut(_:)` attaches in
-    /// AgentsApp.swift. The router returning nil for a handled event was
-    /// assumed to consume the keydown and stop the menu from also firing.
-    /// Measured against the running app — breakpoints on both paths — it
-    /// does not: one ⇧⌘R produces a call from the monitor *and* a call from
-    /// `-[NSMenu _performKeyEquivalentForItemAtIndex:]`. For most actions the
-    /// second dispatch is invisible or self-cancelling (a second toggle, a
-    /// re-select of the row already selected), but the six dialog-presenting
-    /// actions each queued a second dialog behind the first — which is why
-    /// dismissing the rename alert appeared to need two Escapes.
+    /// App shortcuts have two entry points: the local event monitor and
+    /// the menu item's own key equivalent. The monitor originally forwarded
+    /// handled events because its callback coalesced a nil result back to
+    /// the event, causing duplicate actions and dialogs. The callback now
+    /// preserves nil; this guard also protects against duplicate dispatch
+    /// from other callers sharing the same originating keydown.
     ///
     /// Both dispatches happen synchronously inside the same
     /// `-[NSApplication sendEvent:]`, so they share one `NSApp.currentEvent`.
@@ -102,6 +99,9 @@ final class AppActions {
         guard let event = currentEvent(), event.type == .keyDown else {
             return dispatch(action)
         }
+        // A recorder may have consumed this keydown and already finished.
+        // Suppress its menu dispatch too, before it can execute any action.
+        if suppressShortcut(event) { return true }
         if let last = lastKeyDispatch, last.action == action, last.timestamp == event.timestamp {
             return true
         }

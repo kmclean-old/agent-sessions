@@ -1,44 +1,37 @@
 import AppKit
 
-/// The first point through which every keyboard shortcut in the app
-/// flows: one local `NSEvent` monitor. Menus render their shortcuts from
-/// the same effective bindings (via `Shortcut.swiftUIShortcut`), and
-/// this monitor returns nil for a matched, handled keydown — but that does
-/// *not* stop the system from also dispatching the menu item's own key
-/// equivalent. Measured against the running app, both fire, so a single
-/// keystroke reaches `AppActions.perform` twice; `AppActions` is what
-/// makes the second call a no-op, deduplicating by the originating
-/// keydown. Adding a shortcut = adding a Keymap entry; the uniqueness test
-/// in KeymapTests guards against accidental conflicts.
-/// Actions that present modal dialogs defer that presentation via
-/// `AppActions.present` rather than presenting inline: a modal event loop
-/// must never run inside this monitor callback, because the triggering
-/// keydown is still suspended in AppKit's dispatch, and that dispatch
-/// resumes corrupted once the callback finally returns (shortcut keys
-/// leaking into the terminal after the dialog closes). Deferral is also
-/// what keeps `AppActions`' dedup sound — with no modal loop running
-/// between the two dispatches, both see the same `NSApp.currentEvent`.
+/// Routes app shortcuts and recording through one local event monitor.
+/// Menus read the same effective bindings. A handled event must leave the
+/// monitor as nil; optional chaining with `?? event` would accidentally
+/// reintroduce it into menu and terminal dispatch.
+///
+/// Dialog presentation is deferred by AppActions: a modal loop must not run
+/// while the triggering keydown is suspended inside this callback.
 @MainActor
 final class ShortcutRouter {
     private var monitor: Any?
     private let perform: (AppAction) -> Bool
     private let isModalActive: () -> Bool
     private let bindings: () -> [AppAction: Shortcut]
+    private let capture: (NSEvent) -> Bool
 
     init(
         perform: @escaping (AppAction) -> Bool,
         isModalActive: @escaping () -> Bool = { NSApp.modalWindow != nil },
-        bindings: @escaping () -> [AppAction: Shortcut] = { Keymap.standard }
+        bindings: @escaping () -> [AppAction: Shortcut] = { Keymap.standard },
+        capture: @escaping (NSEvent) -> Bool = { _ in false }
     ) {
         self.perform = perform
         self.isModalActive = isModalActive
         self.bindings = bindings
+        self.capture = capture
     }
 
     func install() {
         guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handle(event) ?? event
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event)
         }
     }
 
@@ -56,6 +49,8 @@ final class ShortcutRouter {
         if isModalActive() {
             return event
         }
+        if capture(event) { return nil }
+        guard event.type == .keyDown else { return event }
         // Cheap fast-path: every shortcut in Keymap is ⌘-based, so plain
         // typing never pays the matching cost.
         guard event.modifierFlags.contains(.command) else {

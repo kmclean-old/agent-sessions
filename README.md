@@ -27,6 +27,19 @@ The generated `macapp/Agents.xcodeproj` and build output under `macapp/.build`
 are gitignored — `bb gen` regenerates the project from `macapp/project.yml`
 whenever you need it.
 
+## Keyboard shortcuts
+
+Open **Help ▸ Keyboard Shortcuts** (⇧⌘? by default), click a shortcut, and
+press the new combination. Shortcuts must include Command (⌘); standard
+macOS commands such as Copy, Paste, and Quit are reserved. Conflicting app
+shortcuts show the other action's name and must be resolved before saving.
+
+**Save** applies all edits immediately and remembers them across launches.
+**Cancel** discards the draft. Escape cancels an active recording first;
+outside recording it closes the sheet without saving. Use the clear and
+restore buttons beside each shortcut, or **Restore Defaults** for the whole
+list. Clears and restores also take effect only after Save.
+
 ## Releases
 
 There is one release channel: a rolling `nightly` prerelease on GitHub,

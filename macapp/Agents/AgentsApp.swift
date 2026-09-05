@@ -26,6 +26,7 @@ struct AgentsApp: App {
     let controlServer: ControlServer
     let actions: AppActions
     let router: ShortcutRouter
+    let shortcutCapture: ShortcutCapture
     let uiState: UIState
     let updaterEnabled: Bool
     let updaterController: SPUStandardUpdaterController
@@ -127,6 +128,8 @@ struct AgentsApp: App {
         let uiState = UIState()
         self.uiState = uiState
 
+        let shortcutCapture = ShortcutCapture()
+        self.shortcutCapture = shortcutCapture
         let shortcuts = ShortcutPreferences()
         _shortcuts = StateObject(wrappedValue: shortcuts)
 
@@ -134,17 +137,22 @@ struct AgentsApp: App {
             store: store,
             uiState: uiState,
             panes: center,
-            reviewSessions: { [weak overlays] in overlays?.reviewSessionIDs ?? [] }
+            reviewSessions: { [weak overlays] in overlays?.reviewSessionIDs ?? [] },
+            suppressShortcut: { shortcutCapture.suppresses($0) }
         )
         self.actions = actions
-        let router = ShortcutRouter(perform: { actions.perform($0) }, bindings: { shortcuts.bindings })
+        let router = ShortcutRouter(
+            perform: { actions.perform($0) },
+            bindings: { shortcuts.bindings },
+            capture: { shortcutCapture.handle($0) }
+        )
         self.router = router
         // Local monitors don't need NSApp to have finished launching, so
         // installing here (rather than deferring to RootView's .task) is
         // safe and keeps shortcut wiring colocated with the rest of app
         // construction. (If a real launch shows this is flaky, move the
         // install() call into RootView's .task instead and note why here.)
-        router.install()
+        if !Self.isTestHost { router.install() }
 
         // The dev build (com.kirahowe.agents.dev) never starts the updater
         // at all — this bundle-identifier check is the ONLY place that
@@ -183,6 +191,7 @@ struct AgentsApp: App {
             RootView(store: store, center: center, overlays: overlays, uiState: uiState)
                 .environment(\.appActions, actions)
                 .environmentObject(shortcuts)
+                .environmentObject(shortcutCapture)
                 // Forced explicitly rather than left to the asset catalog
                 // alone: ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME (set
                 // in project.yml) only takes effect when the user's system
