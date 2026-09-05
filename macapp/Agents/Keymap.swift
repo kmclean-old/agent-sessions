@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// Every user-invocable action in the app, expressed as data rather than a
-/// scattered set of ad hoc handlers. `Keymap.standard` is the single source
-/// of truth mapping these to physical key combinations; `ShortcutRouter`
+/// scattered set of ad hoc handlers. `ShortcutPreferences` combines defaults
+/// and user overrides; `ShortcutRouter`
 /// and the app's menus both dispatch through `AppActions.perform(_:)`.
 enum AppAction: Hashable {
     case newSession
@@ -46,11 +46,33 @@ extension AppAction: CaseIterable {
 }
 
 extension AppAction {
-    /// Human-facing label for the ⌘? shortcut-help sheet, which is
-    /// GENERATED from this + `Keymap.standard` rather than hand-maintained
-    /// (see ShortcutHelpView). `selectSession`'s nine cases deliberately all
-    /// share this same title, which is how they collapse into one display
-    /// row (see ShortcutHelpView.rows(in:)).
+    /// Stable preference keys, independent of display labels and enum ordering.
+    var preferenceID: String {
+        switch self {
+        case .newSession: return "newSession"
+        case .closeSession: return "closeSession"
+        case .renameSession: return "renameSession"
+        case .closeWindow: return "closeWindow"
+        case .addProject: return "addProject"
+        case .archiveProject: return "archiveProject"
+        case .removeProject: return "removeProject"
+        case .previousSession: return "previousSession"
+        case .nextSession: return "nextSession"
+        case .selectSession(let index): return "selectSession.\(index + 1)"
+        case .newWorkspace: return "newWorkspace"
+        case .closeWorkspace: return "closeWorkspace"
+        case .splitPaneRight: return "splitPaneRight"
+        case .splitPaneDown: return "splitPaneDown"
+        case .closePane: return "closePane"
+        case .focusPaneLeft: return "focusPaneLeft"
+        case .focusPaneRight: return "focusPaneRight"
+        case .focusPaneUp: return "focusPaneUp"
+        case .focusPaneDown: return "focusPaneDown"
+        case .showShortcutHelp: return "showShortcutHelp"
+        }
+    }
+
+    /// Human-facing label for the shortcut editor.
     var helpTitle: String {
         switch self {
         case .newSession: return "New Session"
@@ -62,7 +84,7 @@ extension AppAction {
         case .removeProject: return "Remove Project…"
         case .previousSession: return "Previous Session"
         case .nextSession: return "Next Session"
-        case .selectSession: return "Jump to session"
+        case .selectSession(let index): return "Jump to Session \(index + 1)"
         case .newWorkspace: return "New Workspace"
         case .closeWorkspace: return "Close Workspace…"
         case .splitPaneRight: return "Split Pane Right"
@@ -98,7 +120,7 @@ extension AppAction {
 }
 
 /// A physical key combination: a key plus an exact set of modifier flags.
-struct Shortcut: Hashable {
+struct Shortcut: Hashable, Codable {
     enum Key: Hashable {
         case char(Character)
         case upArrow
@@ -113,7 +135,72 @@ struct Shortcut: Hashable {
     /// The only modifier bits Shortcut ever cares about. Matching always
     /// intersects against this set first so incidental flags (caps lock,
     /// numeric pad, function, ...) never break a match.
-    private static let relevantModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+    static let relevantModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+
+    init(key: Key, modifiers: NSEvent.ModifierFlags) {
+        if case .char(let character) = key {
+            self.key = .char(Character(String(character).lowercased()))
+        } else {
+            self.key = key
+        }
+        self.modifiers = modifiers.intersection(Self.relevantModifiers)
+    }
+
+    /// Capture and matching share the same character semantics, including
+    /// shifted punctuation (e.g. ⇧⌘/ arrives as "?") and arrow keys.
+    init?(event: NSEvent) {
+        let key: Key
+        switch event.specialKey {
+        case .upArrow: key = .upArrow
+        case .downArrow: key = .downArrow
+        case .leftArrow: key = .leftArrow
+        case .rightArrow: key = .rightArrow
+        default:
+            guard let characters = event.charactersIgnoringModifiers,
+                  characters.count == 1, let character = characters.first,
+                  character.unicodeScalars.allSatisfy({
+                      !CharacterSet.controlCharacters.contains($0)
+                          && !(0xF700...0xF8FF).contains($0.value)
+                  }) else { return nil }
+            key = .char(character)
+        }
+        self.init(key: key, modifiers: event.modifierFlags)
+    }
+
+    private enum CodingKeys: String, CodingKey { case key, modifiers }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try values.decode(String.self, forKey: .key)
+        let key: Key
+        switch name {
+        case "upArrow": key = .upArrow
+        case "downArrow": key = .downArrow
+        case "leftArrow": key = .leftArrow
+        case "rightArrow": key = .rightArrow
+        default:
+            guard name.hasPrefix("char:"), name.dropFirst(5).count == 1,
+                  let character = name.dropFirst(5).first else {
+                throw DecodingError.dataCorruptedError(forKey: .key, in: values, debugDescription: "Unknown shortcut key")
+            }
+            key = .char(character)
+        }
+        self.init(key: key, modifiers: NSEvent.ModifierFlags(rawValue: try values.decode(UInt.self, forKey: .modifiers)))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        let name: String
+        switch key {
+        case .char(let character): name = "char:\(character)"
+        case .upArrow: name = "upArrow"
+        case .downArrow: name = "downArrow"
+        case .leftArrow: name = "leftArrow"
+        case .rightArrow: name = "rightArrow"
+        }
+        try values.encode(name, forKey: .key)
+        try values.encode(modifiers.rawValue, forKey: .modifiers)
+    }
 
     // NSEvent.ModifierFlags does not conform to Hashable, so Shortcut can't
     // derive Hashable automatically — implement it by hand over the
@@ -191,10 +278,8 @@ struct Shortcut: Hashable {
     }
 }
 
-/// THE single source of truth for every keyboard shortcut in the app.
-/// `ShortcutRouter` consumes matched keydowns; menu items render shortcuts
-/// from this same table via `Shortcut.swiftUIShortcut`. To add a shortcut,
-/// add an entry here — `KeymapTests` guards against accidental conflicts.
+/// Factory defaults. Runtime consumers use `ShortcutPreferences.bindings`,
+/// which overlays persisted user choices on this table.
 enum Keymap {
     static let standard: [AppAction: Shortcut] = {
         var map: [AppAction: Shortcut] = [
@@ -235,9 +320,7 @@ enum Keymap {
         return map
     }()
 
-    /// Linear match over `standard`. O(n) is fine for ~16 entries checked
-    /// once per keydown.
-    static func action(for event: NSEvent) -> AppAction? {
-        standard.first { _, shortcut in shortcut.matches(event) }?.key
+    static func action(for event: NSEvent, in bindings: [AppAction: Shortcut] = standard) -> AppAction? {
+        bindings.first { _, shortcut in shortcut.matches(event) }?.key
     }
 }

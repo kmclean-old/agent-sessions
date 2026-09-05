@@ -30,6 +30,7 @@ struct AgentsApp: App {
     let updaterEnabled: Bool
     let updaterController: SPUStandardUpdaterController
     @StateObject private var store: AppStore
+    @StateObject private var shortcuts: ShortcutPreferences
     @AppStorage(AppearanceMode.defaultsKey) private var appearanceMode: AppearanceMode = .system
 
     /// True when this process is an XCTest TEST_HOST launch rather than the
@@ -126,6 +127,9 @@ struct AgentsApp: App {
         let uiState = UIState()
         self.uiState = uiState
 
+        let shortcuts = ShortcutPreferences()
+        _shortcuts = StateObject(wrappedValue: shortcuts)
+
         let actions = AppActions(
             store: store,
             uiState: uiState,
@@ -133,7 +137,7 @@ struct AgentsApp: App {
             reviewSessions: { [weak overlays] in overlays?.reviewSessionIDs ?? [] }
         )
         self.actions = actions
-        let router = ShortcutRouter { actions.perform($0) }
+        let router = ShortcutRouter(perform: { actions.perform($0) }, bindings: { shortcuts.bindings })
         self.router = router
         // Local monitors don't need NSApp to have finished launching, so
         // installing here (rather than deferring to RootView's .task) is
@@ -178,6 +182,7 @@ struct AgentsApp: App {
         Window("Agents", id: "main") {
             RootView(store: store, center: center, overlays: overlays, uiState: uiState)
                 .environment(\.appActions, actions)
+                .environmentObject(shortcuts)
                 // Forced explicitly rather than left to the asset catalog
                 // alone: ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME (set
                 // in project.yml) only takes effect when the user's system
@@ -210,64 +215,64 @@ struct AgentsApp: App {
                 Button("New Session") {
                     actions.perform(.newSession)
                 }
-                .keymapShortcut(.newSession)
+                .keymapShortcut(.newSession, bindings: shortcuts.bindings)
 
                 Button("New Workspace") {
                     actions.perform(.newWorkspace)
                 }
-                .keymapShortcut(.newWorkspace)
+                .keymapShortcut(.newWorkspace, bindings: shortcuts.bindings)
 
                 Button("Add Project…") {
                     actions.perform(.addProject)
                 }
-                .keymapShortcut(.addProject)
+                .keymapShortcut(.addProject, bindings: shortcuts.bindings)
 
                 Button("Archive Project") {
                     actions.perform(.archiveProject)
                 }
-                // No .keymapShortcut: archiveProject is menu-only, like removeProject.
+                .keymapShortcut(.archiveProject, bindings: shortcuts.bindings)
 
                 Button("Remove Project…") {
                     actions.perform(.removeProject)
                 }
-                // No .keymapShortcut: removeProject has no Keymap entry (menu-only).
+                .keymapShortcut(.removeProject, bindings: shortcuts.bindings)
 
                 Button("Close Workspace…") {
                     actions.perform(.closeWorkspace)
                 }
                 .disabled(!selectionTargetsWorkspace)
-                // No .keymapShortcut: closeWorkspace is menu-only.
+                .keymapShortcut(.closeWorkspace, bindings: shortcuts.bindings)
             }
 
             CommandGroup(replacing: .saveItem) {
                 Button("Close Session") {
                     actions.perform(.closeSession)
                 }
-                .keymapShortcut(.closeSession)
+                .keymapShortcut(.closeSession, bindings: shortcuts.bindings)
                 .disabled(store.selection == nil)
 
                 Button("Close Window") {
                     actions.perform(.closeWindow)
                 }
-                .keymapShortcut(.closeWindow)
+                .keymapShortcut(.closeWindow, bindings: shortcuts.bindings)
             }
 
             CommandMenu("Session") {
                 Button("Rename Session…") {
                     actions.perform(.renameSession)
                 }
-                .keymapShortcut(.renameSession)
+                .keymapShortcut(.renameSession, bindings: shortcuts.bindings)
                 .disabled(store.selection == nil)
 
                 Button("Previous Session") {
                     actions.perform(.previousSession)
                 }
-                .keymapShortcut(.previousSession)
+                .keymapShortcut(.previousSession, bindings: shortcuts.bindings)
 
                 Button("Next Session") {
                     actions.perform(.nextSession)
                 }
-                .keymapShortcut(.nextSession)
+                .keymapShortcut(.nextSession, bindings: shortcuts.bindings)
 
                 Divider()
 
@@ -278,19 +283,19 @@ struct AgentsApp: App {
                 Button("Split Pane Right") {
                     actions.perform(.splitPaneRight)
                 }
-                .keymapShortcut(.splitPaneRight)
+                .keymapShortcut(.splitPaneRight, bindings: shortcuts.bindings)
                 .disabled(store.selection == nil)
 
                 Button("Split Pane Down") {
                     actions.perform(.splitPaneDown)
                 }
-                .keymapShortcut(.splitPaneDown)
+                .keymapShortcut(.splitPaneDown, bindings: shortcuts.bindings)
                 .disabled(store.selection == nil)
 
                 Button("Close Pane") {
                     actions.perform(.closePane)
                 }
-                .keymapShortcut(.closePane)
+                .keymapShortcut(.closePane, bindings: shortcuts.bindings)
                 .disabled(store.selection == nil)
 
                 // The four focus-movement commands are deliberately NOT menu
@@ -303,7 +308,7 @@ struct AgentsApp: App {
                 Button("Keyboard Shortcuts") {
                     actions.perform(.showShortcutHelp)
                 }
-                .keymapShortcut(.showShortcutHelp)
+                .keymapShortcut(.showShortcutHelp, bindings: shortcuts.bindings)
             }
         }
         // The single place the appearance preference is actually applied.
@@ -331,17 +336,10 @@ struct AgentsApp: App {
 }
 
 private extension View {
-    /// Applies the `KeyboardShortcut` SwiftUI should render/fire for a menu
-    /// item, sourced from `Keymap.standard` — the same table `Keymap.action`
-    /// matches keydowns against. No-op if the action has no entry (e.g.
-    /// `.removeProject`, which is menu-only).
-    @ViewBuilder
-    func keymapShortcut(_ action: AppAction) -> some View {
-        if let shortcut = Keymap.standard[action] {
-            let (key, modifiers) = shortcut.swiftUIShortcut
-            self.keyboardShortcut(key, modifiers: modifiers)
-        } else {
-            self
-        }
+    /// Use the same effective bindings as the event router. Passing nil
+    /// explicitly removes an old key equivalent when the user clears it.
+    func keymapShortcut(_ action: AppAction, bindings: [AppAction: Shortcut]) -> some View {
+        let shortcut = bindings[action]?.swiftUIShortcut
+        return keyboardShortcut(shortcut.map { KeyboardShortcut($0.key, modifiers: $0.modifiers) })
     }
 }

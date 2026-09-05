@@ -87,4 +87,21 @@ final class ShortcutRouterTests: XCTestCase {
         XCTAssertNotNil(result, "plain typing with no command modifier must pass through")
         XCTAssertEqual(performCallCount, 0, "the fast-path must bail before ever reaching Keymap/perform")
     }
+
+    func test_routerReadsUpdatedBindingsAndReleasesOldShortcut() {
+        var bindings = Keymap.standard
+        var performed: [AppAction] = []
+        let router = ShortcutRouter(
+            perform: { performed.append($0); return true },
+            isModalActive: { false },
+            bindings: { bindings }
+        )
+        bindings[.newSession] = Shortcut(key: .char("j"), modifiers: [.command, .shift])
+        XCTAssertNotNil(router.handle(keyEvent(characters: "t", modifiers: .command)))
+        XCTAssertNil(router.handle(keyEvent(characters: "J", modifiers: [.command, .shift])))
+        XCTAssertEqual(performed, [.newSession])
+        bindings[.newSession] = nil
+        XCTAssertNotNil(router.handle(keyEvent(characters: "J", modifiers: [.command, .shift])))
+        XCTAssertEqual(performed, [.newSession])
+    }
 }

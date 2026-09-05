@@ -2,7 +2,7 @@ import AppKit
 
 /// The first point through which every keyboard shortcut in the app
 /// flows: one local `NSEvent` monitor. Menus render their shortcuts from
-/// the same `Keymap.standard` table (via `Shortcut.swiftUIShortcut`), and
+/// the same effective bindings (via `Shortcut.swiftUIShortcut`), and
 /// this monitor returns nil for a matched, handled keydown — but that does
 /// *not* stop the system from also dispatching the menu item's own key
 /// equivalent. Measured against the running app, both fire, so a single
@@ -23,10 +23,16 @@ final class ShortcutRouter {
     private var monitor: Any?
     private let perform: (AppAction) -> Bool
     private let isModalActive: () -> Bool
+    private let bindings: () -> [AppAction: Shortcut]
 
-    init(perform: @escaping (AppAction) -> Bool, isModalActive: @escaping () -> Bool = { NSApp.modalWindow != nil }) {
+    init(
+        perform: @escaping (AppAction) -> Bool,
+        isModalActive: @escaping () -> Bool = { NSApp.modalWindow != nil },
+        bindings: @escaping () -> [AppAction: Shortcut] = { Keymap.standard }
+    ) {
         self.perform = perform
         self.isModalActive = isModalActive
+        self.bindings = bindings
     }
 
     func install() {
@@ -55,7 +61,7 @@ final class ShortcutRouter {
         guard event.modifierFlags.contains(.command) else {
             return event
         }
-        guard let action = Keymap.action(for: event) else {
+        guard let action = Keymap.action(for: event, in: bindings()) else {
             return event
         }
         if perform(action) {

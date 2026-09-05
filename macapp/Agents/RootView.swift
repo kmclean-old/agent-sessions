@@ -3,6 +3,7 @@ import Combine
 import SwiftUI
 
 struct RootView: View {
+    @EnvironmentObject private var shortcuts: ShortcutPreferences
     @ObservedObject var store: AppStore
     let center: TerminalCenter
     @ObservedObject var overlays: OverlayCenter
@@ -55,9 +56,11 @@ struct RootView: View {
                             .foregroundStyle(.tertiary)
                         Text("Add a project to get started")
                             .font(.title3)
-                        Text("⌘T for a new session")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        if let shortcut = shortcuts.bindings[.newSession] {
+                            Text("\(shortcut.displayString) for a new session")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .multilineTextAlignment(.center)
                 }
