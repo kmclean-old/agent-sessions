@@ -165,10 +165,10 @@ what forgets it for good.
 
 The app remembers the last agent session associated with each terminal,
 whichever harness it was running. After relaunching Agents, opening a
-restored terminal starts a fresh shell, prints one line naming the harness
-and the remembered session title (or, for a session that never titled
-itself, your last prompt), and leaves the harness's own resume command typed
-at the prompt, waiting:
+restored terminal starts a fresh shell that prints one line naming the
+harness and the remembered session title (or, for a session that never
+titled itself, your last prompt) above its first prompt, and the app leaves
+the harness's own resume command typed at that prompt, waiting:
 
 ```text
 Last Claude Code session: Make the resume hint harness agnostic
@@ -178,10 +178,23 @@ Last Claude Code session: Make the resume hint harness agnostic
 Press Enter to resume it, or Ctrl-C to clear the line and use the shell for
 something else. Agents never presses Enter for you: resuming starts the
 harness, the first prompt you send it spends tokens, and restoring twenty
-terminals should not start twenty agents unasked. The banner is typed once
+terminals should not start twenty agents unasked. The command is typed once
 the shell reaches its first prompt — known from the first terminal title it
 sets — or, for a shell that never sets one, a few seconds after the terminal
 opens.
+
+The heading is not typed: typed text reaches a shell as a paste, and a shell
+with bracketed paste on (zsh, by default) would insert a `printf` line at
+the prompt instead of running it. It is printed by the terminal's own spawn
+instead — the restored terminal starts as `zsh -f -c '<print the heading>;
+exec -l zsh'`, which becomes your login shell with its startup files and
+Ghostty's shell integration exactly as a plain spawn would leave them. Two
+consequences. The heading needs zsh as your login shell; under another
+shell the resume command is still typed, with nothing printed above it.
+And libghostty holds a terminal spawned with a command open after that
+command exits, so typing `exit` in a restored terminal shows Ghostty's
+"Process exited" line and closes on the next keypress, where a fresh
+terminal closes at once.
 
 How the app learns the session id depends on the harness:
 
@@ -227,7 +240,7 @@ empty log beside a missing banner means the hook never ran (check the
 `hooks` entries in your harness settings), while a log full of
 `no AGENTS_PANE_ID` means the app is older than the hook. The app itself logs
 `Agents: session … is now resumable as …` when it records a session and
-`typed restore banner` when it prints one; both are visible in Console.app
+`typed resume command` when it types one; both are visible in Console.app
 or with `log show --predicate 'process == "Agents"' --last 1h`. Setting
 `AGENTS_HOOK_DEBUG=1` in the harness's environment logs every hook decision,
 including the sessions it declined to announce.

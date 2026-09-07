@@ -632,7 +632,10 @@ final class TerminalCenterPaneTests: XCTestCase {
         XCTAssertTrue(deliveries.isEmpty, "only the initial pane's prompt counts — the banner is typed there")
 
         center.handleTitleChange(paneID: initialPane, title: "kira@Mac:~")
-        XCTAssertEqual(deliveries, [SessionResumeMetadata.restoreInput(for: metadata)])
+        XCTAssertEqual(
+            deliveries, ["claude --resume c-1"],
+            "the typed part of the banner is the resume command alone — the heading above it is the spawn's own output, never typed"
+        )
 
         center.handleTitleChange(paneID: initialPane, title: "kira@Mac:~/code")
         center.handleSurfaceDetached(paneID: initialPane)
@@ -662,8 +665,8 @@ final class TerminalCenterPaneTests: XCTestCase {
 
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(
-            deliveries, [SessionResumeMetadata.restoreInput(for: metadata)],
-            "a shell that never sets a title must still get its banner once the fallback elapses"
+            deliveries, ["omp --resume o-1"],
+            "a shell that never sets a title must still get its resume command once the fallback elapses"
         )
     }
 

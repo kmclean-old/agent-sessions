@@ -307,95 +307,56 @@ final class SessionResumeTests: XCTestCase {
         )
     }
 
-    // MARK: - restoreInput
+    // MARK: - restoreHeading
 
-    func testRestoreInputPrintsTheHeadingAndLeavesTheResumeCommandTypedButUnrun() {
+    func testRestoreHeadingNamesTheHarnessAndTheRememberedTitle() {
         let metadata = SessionResumeMetadata(agent: "claude", sessionID: "session-123", title: "Repair persistence", prompt: nil)
 
-        let input = SessionResumeMetadata.restoreInput(for: metadata)
-
         XCTAssertEqual(
-            input,
-            "printf '%s\\n' 'Last Claude Code session: Repair persistence'\nclaude --resume session-123",
-            "the heading runs at once (newline-terminated) and the resume command follows with NO newline, so it waits at the prompt: Enter resumes, and nothing spends tokens on the user's behalf"
+            SessionResumeMetadata.restoreHeading(for: metadata),
+            ["Last Claude Code session: Repair persistence"],
+            "a harness with a resume command gets one line — what Enter will resume is already visible in the typed command beneath it"
         )
-        XCTAssertFalse(input.hasSuffix("\n"), "a trailing newline would run the resume command — the one thing this banner must never do")
     }
 
-    func testRestoreInputFallsBackToThePromptForAnUntitledSession() {
+    func testRestoreHeadingFallsBackToThePromptForAnUntitledSession() {
         let metadata = SessionResumeMetadata(agent: "claude", sessionID: "session-123", title: nil, prompt: "Repair persistence")
 
-        XCTAssertTrue(
-            SessionResumeMetadata.restoreInput(for: metadata)
-                .hasPrefix("printf '%s\\n' 'Last Claude Code session: Repair persistence'\n")
-        )
+        XCTAssertEqual(SessionResumeMetadata.restoreHeading(for: metadata), ["Last Claude Code session: Repair persistence"])
     }
 
-    func testRestoreInputUsesEachHarnessesOwnResumeSyntax() {
-        let codex = SessionResumeMetadata(agent: "codex", sessionID: "session-123", title: "Fix the parser", prompt: nil, home: "/h")
-        let omp = SessionResumeMetadata(agent: "omp", sessionID: "session-123", title: "Fix the parser", prompt: nil)
-
-        XCTAssertTrue(SessionResumeMetadata.restoreInput(for: codex).hasSuffix("\nCODEX_HOME=/h codex resume session-123"))
-        XCTAssertTrue(SessionResumeMetadata.restoreInput(for: omp).hasSuffix("\nomp --resume session-123"))
-    }
-
-    func testRestoreInputForUnknownAgentPrintsTheSessionIDAndTypesNothing() {
+    func testRestoreHeadingForUnknownAgentAddsTheSessionIDAndTypesNothing() {
         let metadata = SessionResumeMetadata(agent: "gemini", sessionID: "id-1", title: "T", prompt: nil)
 
         XCTAssertEqual(
-            SessionResumeMetadata.restoreInput(for: metadata),
-            "printf '%s\\n' 'Last gemini session: T' 'Session id: id-1'\n",
+            SessionResumeMetadata.restoreHeading(for: metadata),
+            ["Last gemini session: T", "Session id: id-1"],
             "an agent with no known resume command must not leave a guessed-at command at the prompt — printing the raw session id is the honest fallback"
         )
+        XCTAssertNil(SessionResumeMetadata.resumeCommand(for: metadata))
     }
 
-    func testRestoreInputWithNoTitleOrPromptOmitsTheColonEntirely() {
+    func testRestoreHeadingWithNoTitleOrPromptOmitsTheColonEntirely() {
         let metadata = SessionResumeMetadata(agent: "claude", sessionID: "session-123", title: nil, prompt: nil)
 
-        let input = SessionResumeMetadata.restoreInput(for: metadata)
-
-        XCTAssertTrue(
-            input.hasPrefix("printf '%s\\n' 'Last Claude Code session'\n"),
-            "with neither a title nor a prompt there is nothing to put after a colon, so the heading must read as a plain statement rather than dangle one: \(input)"
+        XCTAssertEqual(
+            SessionResumeMetadata.restoreHeading(for: metadata),
+            ["Last Claude Code session"],
+            "with neither a title nor a prompt there is nothing to put after a colon, so the heading must read as a plain statement rather than dangle one"
         )
     }
 
     func testTitleWinsOverPromptAndThePromptNeverGetsItsOwnLine() {
         let titled = SessionResumeMetadata(agent: "claude", sessionID: "s-1", title: "Fix it", prompt: "Original ask")
 
-        let input = SessionResumeMetadata.restoreInput(for: titled)
-
-        XCTAssertTrue(input.contains("'Last Claude Code session: Fix it'"))
-        XCTAssertFalse(
-            input.contains("Original ask"),
+        XCTAssertEqual(
+            SessionResumeMetadata.restoreHeading(for: titled),
+            ["Last Claude Code session: Fix it"],
             "the prompt is only ever the heading's fallback for an untitled session — printing it beneath a real title would repeat what the title says"
         )
     }
 
-    func testRestoreInputQuotesTheHeadingSoATitleCannotInjectShellLines() {
-        let metadata = SessionResumeMetadata(
-            agent: "omp", sessionID: "id-1", title: "Kira's run'; touch /tmp/nope; echo '", prompt: nil
-        )
-
-        let input = SessionResumeMetadata.restoreInput(for: metadata)
-
-        XCTAssertEqual(
-            input,
-            "printf '%s\\n' 'Last OMP session: Kira'\"'\"'s run'\"'\"'; touch /tmp/nope; echo '\"'\"''\nomp --resume id-1",
-            "the heading is one single-quoted printf argument whatever the title contains; the only newline in the whole input is the one that runs printf"
-        )
-        XCTAssertEqual(input.filter { $0 == "\n" }.count, 1)
-    }
-
-    func testRestoreInputQuotesThePromptFallbackHeadingToo() {
-        let metadata = SessionResumeMetadata(agent: "claude", sessionID: "s-1", title: nil, prompt: "Don't auto-run")
-
-        XCTAssertTrue(
-            SessionResumeMetadata.restoreInput(for: metadata).contains("'Last Claude Code session: Don'\"'\"'t auto-run'")
-        )
-    }
-
-    func testRestoreInputCollapsesNewlinesAndStripsTerminalControls() {
+    func testRestoreHeadingCollapsesNewlinesAndStripsTerminalControls() {
         let titled = SessionResumeMetadata(
             agent: "claude", sessionID: "session-123", title: "Line one\n\tLine two\u{001B}\u{0007}", prompt: nil
         )
@@ -403,14 +364,92 @@ final class SessionResumeTests: XCTestCase {
             agent: "claude", sessionID: "session-123", title: nil, prompt: "Prompt\r\nnext\u{0003}"
         )
 
-        for metadata in [titled, untitled] {
-            let input = SessionResumeMetadata.restoreInput(for: metadata)
-            XCTAssertEqual(input.filter { $0 == "\n" }.count, 1)
-            XCTAssertFalse(input.contains("\u{001B}"))
-            XCTAssertFalse(input.contains("\u{0007}"))
-            XCTAssertFalse(input.contains("\u{0003}"))
-        }
-        XCTAssertTrue(SessionResumeMetadata.restoreInput(for: titled).contains("'Last Claude Code session: Line one Line two'"))
-        XCTAssertTrue(SessionResumeMetadata.restoreInput(for: untitled).contains("'Last Claude Code session: Prompt next'"))
+        XCTAssertEqual(SessionResumeMetadata.restoreHeading(for: titled), ["Last Claude Code session: Line one Line two"])
+        XCTAssertEqual(SessionResumeMetadata.restoreHeading(for: untitled), ["Last Claude Code session: Prompt next"])
+    }
+
+    // MARK: - restoreShellCommand
+
+    func testRestoreShellCommandPrintsTheHeadingThenBecomesTheLoginShell() {
+        let metadata = SessionResumeMetadata(agent: "claude", sessionID: "session-123", title: "Repair persistence", prompt: nil)
+
+        XCTAssertEqual(
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/zsh"),
+            "/bin/zsh -f -c 'printf '\"'\"'%s\\n'\"'\"' '\"'\"'Last Claude Code session: Repair persistence'\"'\"'; exec -l /bin/zsh'",
+            "one bash command line for the runtime's `exec -l`: zsh with no startup files, running a script that prints the heading and execs the same zsh as a login shell — the heading is output above the first prompt, and nothing is ever typed to print it"
+        )
+    }
+
+    func testRestoreShellCommandPrintsEveryHeadingLineForAnUnknownAgent() {
+        let metadata = SessionResumeMetadata(agent: "gemini", sessionID: "id-1", title: "T", prompt: nil)
+
+        XCTAssertEqual(
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/zsh"),
+            "/bin/zsh -f -c 'printf '\"'\"'%s\\n'\"'\"' '\"'\"'Last gemini session: T'\"'\"' '\"'\"'Session id: id-1'\"'\"'; exec -l /bin/zsh'"
+        )
+    }
+
+    func testRestoreShellCommandIsComposedOnlyForZsh() {
+        let metadata = SessionResumeMetadata(agent: "claude", sessionID: "session-123", title: "T", prompt: nil)
+
+        XCTAssertNil(
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/bash"),
+            "Ghostty picks a pane's shell integration from the command's first word, and bash's rewrites the command line — another login shell gets a plain spawn and no heading rather than a pane that silently lost its integration"
+        )
+        XCTAssertNil(SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/opt/homebrew/bin/fish"))
+        XCTAssertNil(SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/sh"))
+        XCTAssertEqual(
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/opt/homebrew/bin/zsh")?
+                .hasPrefix("/opt/homebrew/bin/zsh -f -c '"),
+            true,
+            "any zsh counts, not only Apple's: the login shell is whatever the user set"
+        )
+    }
+
+    /// Runs the composed command exactly as Ghostty's embedded runtime does
+    /// on macOS — `/bin/bash --noprofile --norc -c "exec -l <command>"`,
+    /// minus `login` — against a stand-in login shell that hands the `-f -c`
+    /// script to the real zsh and reports when the script's final `exec -l`
+    /// lands back on it. Two levels of quoting (bash around the words, zsh
+    /// inside the script) are exactly where a hostile title would break
+    /// out, so this is checked against real shells, not by inspection.
+    func testRestoreShellCommandSurvivesRealShellParsingWithAHostileTitle() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("restore-shell-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("nope").path
+        let stub = directory.appendingPathComponent("zsh")
+        try """
+        #!/bin/sh
+        if [ "$1" = -f ] && [ "$2" = -c ]; then exec /bin/zsh -f -c "$3"; fi
+        echo "login shell started with $# arguments"
+        """.write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+
+        let metadata = SessionResumeMetadata(
+            agent: "omp", sessionID: "id-1", title: "Kira's run'; touch \(marker); echo '", prompt: nil
+        )
+        let command = try XCTUnwrap(
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: stub.path)
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["--noprofile", "--norc", "-c", "exec -l \(command)"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        XCTAssertEqual(
+            String(decoding: data, as: UTF8.self),
+            "Last OMP session: Kira's run'; touch \(marker); echo '\nlogin shell started with 0 arguments\n",
+            "the heading is printed verbatim, once, and the login shell follows it"
+        )
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker), "a title is printed, never run — at either quoting level")
     }
 }

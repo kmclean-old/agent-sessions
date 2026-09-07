@@ -71,6 +71,11 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// How long after the surface attaches to wait for a prompt signal
     /// before typing anyway.
     private let promptFallbackDelay: TimeInterval
+    /// The shell libghostty spawns in a pane given no command — what a
+    /// restored pane's heading command has to become, see
+    /// `SessionResumeMetadata.restoreShellCommand`. Injectable so tests pin
+    /// the composed command without depending on the test host's shell.
+    private let loginShell: String
 
     /// Both delays are injectable so tests can run the state machine
     /// synchronously (zero) or hold the fallback off entirely.
@@ -84,11 +89,32 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             }
         },
         promptSettleDelay: TimeInterval = 0.1,
-        promptFallbackDelay: TimeInterval = 3.0
+        promptFallbackDelay: TimeInterval = 3.0,
+        loginShell: String = TerminalCenter.userLoginShell
     ) {
         self.textDelivery = textDelivery
         self.promptSettleDelay = promptSettleDelay
         self.promptFallbackDelay = promptFallbackDelay
+        self.loginShell = loginShell
+    }
+
+    /// The user's login shell — what libghostty spawns in a pane given no
+    /// command. Ghostty's own default (config/Config.zig) is `SHELL` for a
+    /// launch from a terminal and the passwd entry for one from the
+    /// desktop; here `SHELL` is consulted first, then passwd, then
+    /// `/bin/sh`. The two agree either way: a desktop-launched app's
+    /// `SHELL`, when set at all, is the login record's shell, and a
+    /// terminal launch (`bb run`, a verify build) carries that terminal's.
+    /// Nonisolated so it can be `init`'s default argument.
+    nonisolated static var userLoginShell: String {
+        if let shell = ProcessInfo.processInfo.environment["SHELL"], !shell.isEmpty {
+            return shell
+        }
+        if let passwd = getpwuid(getuid()), let shell = passwd.pointee.pw_shell {
+            let path = String(cString: shell)
+            if !path.isEmpty { return path }
+        }
+        return "/bin/sh"
     }
 
     /// Runs `work` on the main actor after `delay`; synchronously when the
@@ -262,6 +288,12 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         restoredResume: SessionResumeMetadata?
     ) -> Bool {
         guard !quiescedSessionIDs.contains(sessionID) else { return false }
+        // The initial pane's spawn prints the restore heading before the
+        // shell starts, when there is a record to print about — see
+        // `SessionResumeMetadata.restoreShellCommand`.
+        let restoreCommand = restoredResume.flatMap {
+            SessionResumeMetadata.restoreShellCommand(for: $0, loginShell: loginShell)
+        }
 
         if let layout = layouts[sessionID] {
             for paneID in layout.paneIDs {
@@ -274,6 +306,13 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                 entry.controller = controller
                 entry.view.delegate = proxy
                 panes[paneID] = entry
+                // The kept view still carries the configuration it was
+                // first spawned with; only the heading command is the
+                // current record's to set — or clear — before the controller
+                // builds the new surface from it.
+                if paneID == layout.initialPane {
+                    entry.view.configuration.command = restoreCommand
+                }
                 entry.view.controller = controller
                 resumeHints[sessionID] = ResumeHintState(metadata: restoredResume)
                 if restoredResume != nil, resumeAuthorship[sessionID] == nil {
@@ -293,18 +332,22 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             resumeAuthorship[sessionID] = .frozen
         }
         panes[paneID] = makePane(
-            sessionID: sessionID, paneID: paneID, workingDirectory: workingDirectory
+            sessionID: sessionID, paneID: paneID, workingDirectory: workingDirectory,
+            command: restoreCommand
         )
         return true
     }
 
     /// Spawns a fresh pane surface: the user's login shell in
-    /// `workingDirectory`, with the session's stamped environment (shared
-    /// `AGENTS_SESSION_ID` included). Setup order mirrors the package's own
-    /// AppKit example: delegate, then configuration, then controller, before
-    /// the caller adds the view to the hierarchy.
+    /// `workingDirectory` — or `command`, which for a restored session's
+    /// initial pane prints the restore heading and then becomes that shell
+    /// (see `SessionResumeMetadata.restoreShellCommand`) — with the
+    /// session's stamped environment (shared `AGENTS_SESSION_ID` included).
+    /// Setup order mirrors the package's own AppKit example: delegate, then
+    /// configuration, then controller, before the caller adds the view to
+    /// the hierarchy.
     private func makePane(
-        sessionID: String, paneID: UUID, workingDirectory: String
+        sessionID: String, paneID: UUID, workingDirectory: String, command: String? = nil
     ) -> PaneEntry {
         let proxy = SessionDelegateProxy(sessionID: sessionID, paneID: paneID, center: self)
         // DropTerminalView adds Finder drag-and-drop (the package itself has
@@ -316,7 +359,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         view.configuration = TerminalSurfaceOptions(
             backend: .exec,
             workingDirectory: workingDirectory,
-            envVars: Self.sessionEnvVars(for: sessionID, paneID: paneID)
+            envVars: Self.sessionEnvVars(for: sessionID, paneID: paneID),
+            command: command
         )
         let controller = TerminalController(terminalConfiguration: Self.terminalConfiguration)
         view.controller = controller
@@ -472,12 +516,14 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
 
     // MARK: - Resume hint
 
-    /// Types the restore banner (see `SessionResumeMetadata.restoreInput`)
+    /// Types the resume command (see `SessionResumeMetadata.resumeCommand`)
     /// exactly once per restored session, into the session's initial pane
     /// only, and only when metadata was already present when the live
     /// surface was created. Metadata learned from an agent running in the
     /// current surface is intentionally never injected back into that
-    /// active session.
+    /// active session. The heading above the command is not typed at all:
+    /// the pane's own spawn printed it before the shell started — see
+    /// `SessionResumeMetadata.restoreShellCommand` and `ensureSession`.
     ///
     /// Delivery waits for the pane to be ready for input, which is two
     /// things (see `TerminalReadiness.isReady`): its surface must exist —
@@ -528,10 +574,16 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
 
         hint.didShow = true
         resumeHints[sessionID] = hint
+        guard let command = SessionResumeMetadata.resumeCommand(for: metadata) else {
+            // A harness with no known resume syntax gets only the heading,
+            // session id included, and the spawn has already printed that.
+            NSLog("Agents: nothing to type for session \(sessionID) — no resume command for \(metadata.agent)")
+            return
+        }
         NSLog(
-            "Agents: typed restore banner into session \(sessionID) pane \(layout.initialPane.uuidString) (\(metadata.agent) \(metadata.sessionID))"
+            "Agents: typed resume command into session \(sessionID) pane \(layout.initialPane.uuidString) (\(metadata.agent) \(metadata.sessionID))"
         )
-        textDelivery(entry.view, SessionResumeMetadata.restoreInput(for: metadata))
+        textDelivery(entry.view, command)
     }
 
     /// Called by a pane's delegate proxy once Ghostty has built the pane's

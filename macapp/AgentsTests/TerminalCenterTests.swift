@@ -194,7 +194,7 @@ final class TerminalCenterTests: XCTestCase {
                 deliveredTexts.append(text)
                 deliveryProxies.append(view.delegate as! SessionDelegateProxy)
             },
-            promptSettleDelay: 0, promptFallbackDelay: 0
+            promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/zsh"
         )
         let sessionID = "recreated"
         let hostView = NSView()
@@ -205,6 +205,7 @@ final class TerminalCenterTests: XCTestCase {
         )!
         hostView.addSubview(oldView)
         let oldProxy = oldView.delegate as! SessionDelegateProxy
+        XCTAssertNil(oldView.configuration.command, "nothing to resume yet: a plain login shell")
         var exitedIDs: [String] = []
         center.onProcessExit = { exitedIDs.append($0) }
 
@@ -224,6 +225,11 @@ final class TerminalCenterTests: XCTestCase {
             restoredResume: metadata
         )!
         let recreatedProxy = recreatedView.delegate as! SessionDelegateProxy
+        XCTAssertEqual(
+            recreatedView.configuration.command,
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/zsh"),
+            "the reused view is respawned with the CURRENT record's heading command, not whatever it was first spawned with"
+        )
         hostView.addSubview(recreatedView)
         center.handleSurfaceAttached(paneID: center.layouts[sessionID]!.initialPane)
 
@@ -250,11 +256,50 @@ final class TerminalCenterTests: XCTestCase {
 
         XCTAssertEqual(
             deliveredTexts,
-            ["printf '%s\\n' 'Last OMP session: Repair recreation'\nomp --resume omp-recreated"]
+            ["omp --resume omp-recreated"],
+            "only the resume command is typed — the heading is the spawn's own output"
         )
         XCTAssertEqual(deliveryProxies.count, 1)
         XCTAssertTrue(deliveryProxies[0] === recreatedProxy)
         XCTAssertFalse(deliveryProxies[0] === oldProxy)
+    }
+
+    func testRestoredSessionsInitialPaneIsSpawnedWithTheHeadingCommand() {
+        let center = TerminalCenter(promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/zsh")
+        let metadata = SessionResumeMetadata(agent: "claude", sessionID: "c-1", title: "Restored work", prompt: nil)
+
+        let restored = center.terminalView(for: "restored", workingDirectory: "/tmp", restoredResume: metadata)!
+        XCTAssertEqual(
+            restored.configuration.command,
+            SessionResumeMetadata.restoreShellCommand(for: metadata, loginShell: "/bin/zsh"),
+            "the heading is the pane's own output: the initial pane is spawned with the command that prints it and then becomes the login shell"
+        )
+        XCTAssertEqual(restored.configuration.workingDirectory, "/tmp")
+        XCTAssertEqual(
+            restored.configuration.envVars["AGENTS_SESSION_ID"], "restored",
+            "the heading command changes nothing else about the spawn — the hook's environment contract still holds"
+        )
+
+        let split = center.splitPane(in: "restored", axis: .horizontal, workingDirectory: "/tmp")!
+        XCTAssertNil(
+            center.view(forPane: split)?.configuration.command,
+            "a split is a plain shell — the heading belongs to the initial pane only, like the typed command"
+        )
+
+        let fresh = center.terminalView(for: "fresh", workingDirectory: "/tmp", restoredResume: nil)!
+        XCTAssertNil(fresh.configuration.command, "a session with nothing to resume is spawned as the plain login shell")
+    }
+
+    func testRestoredSessionUnderANonZshLoginShellIsSpawnedPlain() {
+        let center = TerminalCenter(promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/bash")
+        let metadata = SessionResumeMetadata(agent: "claude", sessionID: "c-1", title: "Restored work", prompt: nil)
+
+        let restored = center.terminalView(for: "restored", workingDirectory: "/tmp", restoredResume: metadata)!
+
+        XCTAssertNil(
+            restored.configuration.command,
+            "no heading for a shell whose Ghostty integration the spawn could not carry through — the plain shell, with the resume command still typed into it, beats a pane that quietly lost its integration"
+        )
     }
 
     private func drainMainQueue() async {

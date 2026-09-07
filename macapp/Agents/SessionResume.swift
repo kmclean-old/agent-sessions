@@ -152,7 +152,7 @@ extension SessionResumeMetadata {
     /// The shell command that resumes a harness's own session, or nil for a
     /// harness this app doesn't know how to resume. It is typed at the
     /// prompt of a restored shell and run by the user's Enter (see
-    /// `restoreInput`), so everything it embeds is one shell word: the
+    /// `restoreHeading`), so everything it embeds is one shell word: the
     /// session id — which comes from the harness itself, but is quoted
     /// whenever it carries anything a shell could interpret — and, when
     /// the harness ran under a non-default configuration home, that home
@@ -203,10 +203,10 @@ extension SessionResumeMetadata {
         }
     }
 
-    /// What gets typed into a restored session's fresh shell, in one write:
-    /// a `printf` that prints the heading, newline-terminated so the shell
-    /// runs it at once, then the resume command with NO newline, so it sits
-    /// at the prompt waiting for the user's Enter —
+    /// The lines a restored session's shell prints above its first prompt —
+    /// see `restoreShellCommand` for how they get there — so that, with
+    /// the resume command typed beneath them (`TerminalCenter`), the pane
+    /// reads
     ///
     ///     Last Claude Code session: Agent session persistence on restart
     ///     ❯ claude --resume 8b5667f6-3fe2-4e76-8c53-a385933a6c4a
@@ -217,20 +217,61 @@ extension SessionResumeMetadata {
     /// of its own), and the command is the harness's own resume syntax, so
     /// a glance shows exactly what Enter will do. Nothing runs by itself:
     /// resuming stays the user's decision. A harness with no known resume
-    /// syntax gets its session id in the printed text instead, and nothing
+    /// syntax gets its session id on a second line instead, and nothing
     /// typed at the prompt.
-    static func restoreInput(for metadata: SessionResumeMetadata) -> String {
+    static func restoreHeading(for metadata: SessionResumeMetadata) -> [String] {
         let name = displayName(agent: metadata.agent)
-        let heading = (metadata.title ?? metadata.prompt).map(terminalSafeSingleLine)
-        var lines = [heading.map { "Last \(name) session: \($0)" } ?? "Last \(name) session"]
-
-        let command = resumeCommand(for: metadata)
-        if command == nil {
+        let subject = (metadata.title ?? metadata.prompt).map(terminalSafeSingleLine)
+        var lines = [subject.map { "Last \(name) session: \($0)" } ?? "Last \(name) session"]
+        if resumeCommand(for: metadata) == nil {
             lines.append("Session id: \(terminalSafeSingleLine(metadata.sessionID))")
         }
+        return lines
+    }
 
-        let arguments = lines.map { "'\(singleQuoted($0))'" }.joined(separator: " ")
-        return "printf '%s\\n' \(arguments)\n" + (command ?? "")
+    /// The command a restored session's initial pane is spawned with, in
+    /// place of the bare login shell: it prints `restoreHeading` and then
+    /// becomes that login shell, so the heading is the shell's OUTPUT above
+    /// its first prompt and nothing sits at the prompt but the resume
+    /// command typed later. Nil — spawn the plain shell, print no heading —
+    /// unless `loginShell` is zsh.
+    ///
+    /// The heading has to be printed before the shell rather than typed
+    /// into it: text sent to a pane is a paste, and a shell with bracketed
+    /// paste on (zsh, by default) inserts a pasted `printf …⏎` into its
+    /// line editor as a second line instead of running it — the heading
+    /// never printed, and the user's Enter ran both lines. Only the process
+    /// that owns the pty before the shell can write plain output to it.
+    ///
+    /// The shape is dictated by libghostty's embedded runtime and Ghostty's
+    /// shell integration:
+    ///
+    /// - The runtime runs the string as `login -flp <user> /bin/bash
+    ///   --noprofile --norc -c "exec -l <string>"` (termio/Exec.zig), so it
+    ///   must be one bash simple command: an intermediary shell running a
+    ///   `-c` script, every word quoted for bash.
+    /// - Ghostty chooses the shell integration to apply from the basename
+    ///   of the string's FIRST word (termio/shell_integration.zig). Zsh's
+    ///   integration is purely environment — `ZDOTDIR` re-pointed at
+    ///   Ghostty's own `.zshenv`, which restores the user's — so a `zsh -f`
+    ///   (no startup files: that `.zshenv` is left for the real shell) that
+    ///   prints and then `exec -l`s the same zsh leaves the login shell
+    ///   exactly as a plain spawn would: same process tree (the
+    ///   intermediary is exec'd away), same integration, same rc files run
+    ///   once. Bash's integration rewrites the command line and fish's is
+    ///   untested here, so any other login shell gets no heading rather
+    ///   than a pane that silently lost its integration.
+    /// - A surface spawned with a command is held open after that command
+    ///   exits (`wait-after-command`, forced on by the runtime — see
+    ///   `OverlayCenter`): a restored pane whose shell exits shows Ghostty's
+    ///   "Process exited" line and closes on the next keypress, where a
+    ///   fresh pane closes at once. The price of the heading.
+    static func restoreShellCommand(for metadata: SessionResumeMetadata, loginShell: String) -> String? {
+        guard (loginShell as NSString).lastPathComponent == "zsh" else { return nil }
+        let shell = shellWord(loginShell)
+        let arguments = restoreHeading(for: metadata).map { "'\(singleQuoted($0))'" }.joined(separator: " ")
+        let script = "printf '%s\\n' \(arguments); exec -l \(shell)"
+        return "\(shell) -f -c '\(singleQuoted(script))'"
     }
 
     private static func parseOmpDecoratedTitle(_ title: String) -> (recognized: Bool, title: String?) {
