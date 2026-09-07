@@ -117,8 +117,8 @@ final class WorkspaceEngineCLI: WorkspaceEngineProviding {
     // out here is safe.
     private let trashWorkspaceDirectory: @Sendable (URL) throws -> Void
     /// Where a project's new workspaces go on disk, passed to the CLI as
-    /// `--workspaces-root`. Injected so tests never create directories
-    /// under the real `~/.agents`; production uses `WorkspacesRoot`.
+    /// `--workspaces-root`. Injected so tests never create a `.workspaces`
+    /// directory beside a real project; production uses `WorkspacesRoot`.
     private let workspacesRoot: @Sendable (_ projectPath: String) -> String
 
     nonisolated init(

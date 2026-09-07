@@ -200,9 +200,9 @@ final class WorkspaceEngineCLITests: XCTestCase {
             .path
         defer { try? FileManager.default.removeItem(atPath: workspacesRoot) }
 
-        // Inject the root so the test never writes under the real
-        // ~/.agents/workspaces; the production wiring is pinned by
-        // test_createWorkspace_passesTheProjectKeyedWorkspacesRoot.
+        // Inject the root so the test never leaves a `.workspaces`
+        // directory beside the temp repo; the production wiring is pinned
+        // by test_createWorkspace_passesTheSiblingWorkspacesRoot.
         let engine = WorkspaceEngineCLI(workspacesRoot: { _ in workspacesRoot })
         let row = try await engine.createWorkspace(projectPath: projectDir)
 
@@ -474,9 +474,9 @@ final class WorkspaceEngineCLITests: XCTestCase {
     }
 
     /// The one subcommand that learns where workspaces go. A default-built
-    /// engine must send the app-owned, project-keyed root, and an injected
-    /// resolver must be honored verbatim.
-    func test_createWorkspace_passesTheProjectKeyedWorkspacesRoot() async throws {
+    /// engine must send the sibling root `WorkspacesRoot` computes, and an
+    /// injected resolver must be honored verbatim.
+    func test_createWorkspace_passesTheSiblingWorkspacesRoot() async throws {
         let envelope = #"{"ok":true,"workspace":{"name":"ws-stub","jj_name":"agents/ws-stub","path":"/tmp/roots/ws-stub","project":"/tmp/proj-stub","vcs":"jj"}}"#
 
         let defaultArguments = try await withStubBB(json: envelope) {

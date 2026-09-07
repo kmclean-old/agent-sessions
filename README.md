@@ -71,15 +71,23 @@ secrets.
 A workspace is an isolated draft of a project: agents read, write, and run
 commands in it without touching the project's own files. Create one with
 **New Workspace** (⌘N) from the File menu, or from a project's header menu —
-either way you pick the project and can set an optional sidebar label. It
-lives on disk at `~/.agents/workspaces/<project>-<hash>/<generated-name>`,
-outside every repository — keyed by project so two projects' generated
-names never collide, with a short hash of the project's path so two
-checkouts with the same name don't share a directory (the label is
-sidebar-only; it never renames the workspace). It's a jj workspace or a
-git worktree depending on the project, detected automatically — a colocated
-jj/git repo is treated as jj. Each workspace keeps its own sessions in the
-sidebar, nested underneath it.
+either way you pick the project and can set an optional sidebar label (the
+label is sidebar-only; it never renames the workspace). It lives on disk
+beside the project, at `<parent>/.workspaces/<project>/<generated-name>` —
+for `~/code/projects/agents` that is
+`~/code/projects/.workspaces/agents/<generated-name>`. Beside rather than
+inside, so nothing that walks the project's tree (`git clean -fdx`,
+indexers, backups) ever meets it; beside rather than somewhere app-owned,
+so a workspace has exactly the project's own ancestors, and a session there
+picks up the same `CLAUDE.md` chain, `.envrc`, and anything else discovered
+by walking up from the working directory. One `.workspaces` per parent with
+a directory per project keeps two projects' generated names from colliding.
+A project whose parent is itself inside a repository, or isn't writable,
+gets its workspaces under `~/.agents/workspaces/<project>-<hash>/` instead,
+outside every repository. It's a jj workspace or a git worktree depending
+on the project, detected automatically — a colocated jj/git repo is treated
+as jj. Each workspace keeps its own sessions in the sidebar, nested
+underneath it.
 
 ### Closing a workspace
 
