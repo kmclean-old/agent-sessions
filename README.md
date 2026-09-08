@@ -138,28 +138,29 @@ workspace and moves its folder to the Bin — the commits stay in the
 repository's history (jj) or on the `agents/<name>` branch (git), so they're
 recoverable by hand.
 
-## Archiving projects
+## Hiding projects
 
-A project you are not working in right now can be archived out of the
-sidebar. Swipe its row leftward (two fingers on a trackpad) and choose
-**Archive**, or swipe all the way; the same action is on the row's ellipsis
-and context menus, and on the File menu as **Archive Project** for the
-selected session's project.
+A project you are not working in right now can be hidden from the sidebar.
+Swipe its row leftward (two fingers on a trackpad) and choose **Hide**, or
+swipe all the way; the same action is on the row's ellipsis and context
+menus, and on the File menu as **Hide Project** for the selected session's
+project.
 
-Archiving stops the project's terminals, exactly as removing it does, but
-keeps everything else the app knew: the sessions with their names, agent
-titles and resume hints, and the workspace rows. Nothing on disk changes —
-not the project, not its workspaces, not its repository — so there is
-nothing to confirm.
+Hiding stops the project's terminals, exactly as removing it does, but keeps
+its sessions with their names, agent titles and resume hints, and its
+workspace rows. Nothing on disk changes — not the project, not its
+workspaces, not its repository — so there is nothing to confirm.
 
-Archived projects gather in a collapsed **Archived** section at the bottom of
-the sidebar, most recently archived first, each with its path under its name.
-Click one (or swipe it rightward and choose **Restore**) to put it back at
-the end of the project list with its sessions as they were; opening a
-restored session prints its resume hint, as after a relaunch. Adding a
-project whose directory is archived restores it the same way rather than
-opening a second copy. **Remove Project…**, on an archived row's menu, is
-what forgets it for good.
+The sidebar footer groups **Hidden**, with a count, beside **Add project**.
+Click **Hidden** to open a list of the projects you chose to hide, most
+recently hidden first, each with its path under its name. Click a project
+(or swipe it rightward and choose **Show in Sidebar**) to bring it back at
+the end of the project list with its sessions as they were. The popover
+closes and its first session is selected; opening a saved session prints
+its resume hint, as after a relaunch. Adding a hidden project's directory
+brings it back the same way rather than opening a second copy.
+**Remove Project…**, on a hidden row's menu, forgets it for good. The
+**Hidden** control disappears when there are no hidden projects.
 
 ## Resuming agent sessions after a restart
 

@@ -1,16 +1,20 @@
-# Project archiving
+# Hidden projects
+
+The user-facing vocabulary is **Hide Project**, **Hidden**, and **Show in
+Sidebar**. The internal archive/restore names and persisted keys below are
+retained for compatibility; they describe the same lifecycle.
 
 ## Mental model
 
 The sidebar lists the projects you are working in. A project you are not
-working in right now can be archived: it leaves the list, its terminals stop,
+working in right now can be hidden: it leaves the list, its terminals stop,
 and everything the app knew about it is kept whole — its sessions with their
 names, agent titles and resume hints, and its workspace rows. Restoring the
 project puts all of that back exactly as it was.
 
-Archiving is bookkeeping in the app, not an operation on the project. Nothing
+Hiding is bookkeeping in the app, not an operation on the project. Nothing
 on disk changes: not the project directory, not its workspaces, not its
-repository. That is the same promise Remove Project already makes; archiving
+repository. That is the same promise Remove Project already makes; hiding
 adds the promise that the app's own record survives too.
 
 Remove Project remains the way to forget a project entirely, whether it is
@@ -40,29 +44,30 @@ active or archived.
 
 ## Experience
 
-**Archiving.** The project row in the sidebar is a List row (previously a
-Section header), with its sessions and workspaces nested beneath. Swiping the
-row leftward reveals **Archive**; a full swipe archives outright, as in Mail.
-The same action is on the row's ellipsis menu and context menu, and on the
-File menu as **Archive Project** for the selected session's project. The
-selection moves to the next project's first session — the previous project's
-when the archived one was last — so the terminal area never goes blank while
-other projects remain.
+**Hiding.** Swiping a project row leftward reveals **Hide**; a full swipe
+hides it outright. The same action appears in the row's ellipsis and
+context menus, and in the File menu as **Hide Project**. Selection moves to
+the next project's first session, or the previous project's when the hidden
+one was last.
 
-**The Archived section.** When at least one project is archived, a collapsed
-**Archived** disclosure appears at the bottom of the project list, above Add
-Project, with a count. It is ordered most recently archived first. Each row
-shows the project name with its path beneath in secondary text. Clicking a
-row restores the project and selects its first session; a project archived
-with no sessions gets a fresh one, as Add Project would give it. Swiping the
-row rightward reveals **Restore**. The row's ellipsis and context menus offer
-**Restore Project** and **Remove Project…**, the latter with the usual
-confirmation.
+**Footer.** A fixed footer, separated from the scrolling project list by an
+inset divider, groups a muted **Hidden** button and count on the left with a
+compact, softly filled **Add project** button on the right. The hidden
+control uses an eye-slash icon and disappears when its count reaches zero.
+Both actions have subtle hover and press feedback and use semantic colors
+for light and dark appearances.
 
-**Naming.** "Archive" is used rather than "Close": Close Workspace moves files
-to the Bin, and a Close Project that touched nothing on disk would suggest
-otherwise. "Archived" rather than "Recent": the section holds projects that
-were deliberately parked, not a history of everything ever opened.
+**Hidden projects.** Clicking **Hidden** opens a popover with a bounded,
+scrollable list, most recently hidden first. Each row shows the name and
+path. Clicking a row, choosing **Show in Sidebar** from its menu, or swiping
+it rightward shows the project and dismisses the popover. Its first session
+is selected; a project without saved sessions gets a fresh one. The row's
+menus also offer **Remove Project…** with the usual confirmation. Removing
+the last hidden project dismisses the popover.
+
+**Naming.** "Hidden" describes a deliberate choice to take a project out of
+the sidebar. It is not an archive or an automatically inferred inactivity
+status. "Add project" opens an existing folder rather than creating one.
 
 ## Integration design
 
@@ -91,9 +96,9 @@ were deliberately parked, not a history of everything ever opened.
 
 1. Model and store: `ArchivedProject`, persistence, archive/restore/remove
    semantics, with store tests for the invariants above.
-2. Action and menus: `AppAction.archiveProject`, File menu item, action tests.
-3. Sidebar: the project header becomes a row with the Archive swipe; the
-   Archived section with restore.
+2. Action and menus: `AppAction.archiveProject`, Hide Project menu item, action tests.
+3. Sidebar: project rows with the Hide swipe; the footer and hidden-project
+   popover with Show in Sidebar.
 4. README and TODO.
 
 ## Non-goals

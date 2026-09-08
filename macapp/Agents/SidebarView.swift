@@ -21,9 +21,7 @@ struct SidebarView: View {
         return store.attention[sessionID]?.activity
     }
 
-    /// Collapsed by default: the section exists to get parked projects out
-    /// of the way, so it must not take back the space they just freed.
-    @State private var isArchivedExpanded = false
+    @State private var isHiddenProjectsPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,7 +30,7 @@ struct SidebarView: View {
                     // One Section per project keeps the spacing between
                     // projects, but the project is named by the Section's
                     // first ROW, not a header: swipe actions attach to rows
-                    // only, so a header could never carry the Archive
+                    // only, so a header could never carry the Hide
                     // swipe. The same row is where project reordering and
                     // collapse will hang later.
                     Section {
@@ -69,61 +67,121 @@ struct SidebarView: View {
                         }
                     }
                 }
-
-                // Present only while something is parked: an empty "Archived
-                // (0)" would be a permanent reminder of a feature not in use.
-                if !store.archivedProjects.isEmpty {
-                    Section {
-                        DisclosureGroup(isExpanded: $isArchivedExpanded) {
-                            ForEach(store.archivedProjects) { archived in
-                                ArchivedProjectRowView(store: store, archived: archived)
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "archivebox")
-                                    .foregroundStyle(.secondary)
-                                Text("Archived")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                Text("\(store.archivedProjects.count)")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                            }
-                            .padding(.vertical, 5)
-                            .accessibilityElement(children: .combine)
-                        }
-                    }
-                }
             }
             .listStyle(.sidebar)
             .environment(\.defaultMinListRowHeight, 28)
 
-            // Bottom-left, borderless, and secondary-styled on purpose: a
-            // full-width footer bar here read as too heavy for the panel,
-            // and putting this in the window toolbar instead made it look
-            // like it belonged to the terminal window, not the project list.
-            // Living inside the sidebar panel keeps it scoped to what it acts on.
-            HStack {
+            footer
+        }
+        .onChange(of: store.archivedProjects.isEmpty) { _, isEmpty in
+            if isEmpty { isHiddenProjectsPresented = false }
+        }
+    }
+
+    /// Fixed outside the project list so both actions remain reachable while
+    /// scrolling. Hidden projects open separately without displacing live rows.
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Divider()
+                .padding(.horizontal, 12)
+
+            HStack(spacing: 6) {
+                if !store.archivedProjects.isEmpty {
+                    Button {
+                        isHiddenProjectsPresented.toggle()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "eye.slash")
+                            Text("Hidden")
+                            Text("\(store.archivedProjects.count)")
+                                .font(.caption.monospacedDigit())
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                    .buttonStyle(SidebarFooterButtonStyle())
+                    .help("Show hidden projects")
+                    .accessibilityLabel("Hidden projects, \(store.archivedProjects.count)")
+                    .accessibilityValue(isHiddenProjectsPresented ? "Expanded" : "Collapsed")
+                    .popover(isPresented: $isHiddenProjectsPresented, arrowEdge: .top) {
+                        hiddenProjects
+                    }
+                }
+
+                Spacer(minLength: 0)
+
                 Button {
                     actions?.perform(.addProject)
                 } label: {
-                    Label("Add Project", systemImage: "plus")
-                        .font(.callout)
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .foregroundStyle(Theme.accent)
+                        Text("Add project")
+                    }
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help("Add Project…")
-                Spacer()
+                .buttonStyle(SidebarFooterButtonStyle(isEmphasized: true))
+                .help("Add an existing project…")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .font(.system(size: 12))
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 10)
         }
+    }
+
+    private var hiddenProjects: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Hidden projects")
+                .font(.headline)
+                .padding(12)
+            Divider()
+            List {
+                ForEach(store.archivedProjects) { archived in
+                    HiddenProjectRowView(store: store, archived: archived) {
+                        isHiddenProjectsPresented = false
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 48)
+            .frame(height: min(CGFloat(store.archivedProjects.count) * 60, 320))
+        }
+        .frame(width: 320)
     }
 
     private func sessions(in workspace: WorkspaceRow) -> [SessionRow] {
         let target = TargetRef.workspace(projectPath: workspace.projectPath, name: workspace.name)
         return store.sessions.filter { $0.target == target }
+    }
+}
+
+/// Subtle hover and press feedback shared by the footer's two actions.
+private struct SidebarFooterButtonStyle: ButtonStyle {
+    var isEmphasized = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        FooterButton(configuration: configuration, isEmphasized: isEmphasized)
+    }
+
+    private struct FooterButton: View {
+        let configuration: ButtonStyle.Configuration
+        let isEmphasized: Bool
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(isEmphasized || isHovered ? .primary : .secondary)
+                .padding(.horizontal, 6)
+                .frame(minHeight: 30)
+                .background(
+                    .primary.opacity(configuration.isPressed ? 0.14 : isHovered ? 0.10 : isEmphasized ? 0.06 : 0),
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 7))
+                .onHover { isHovered = $0 }
+        }
     }
 }
 
@@ -190,14 +248,13 @@ private struct ProjectRowView: View {
         .contextMenu {
             menuItems
         }
-        // Trailing edge, full swipe allowed, like archiving in Mail. No
-        // confirmation: an archive is undone in one click from the Archived
-        // section, and the parked rows keep their resume hints.
+        // Hiding is undone in one click from the footer's project list;
+        // the parked rows keep their resume hints.
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button {
                 store.archiveProject(project)
             } label: {
-                Label("Archive", systemImage: "archivebox")
+                Label("Hide", systemImage: "eye.slash")
             }
             .tint(Theme.accent)
         }
@@ -234,7 +291,7 @@ private struct ProjectRowView: View {
         // specific right-clicked project, not the resolved-from-selection
         // target AppActions' .archiveProject/.removeProject cases would use
         // (see design rationale in AppActions.swift).
-        Button("Archive Project") {
+        Button("Hide Project") {
             store.archiveProject(project)
         }
         Button("Remove Project…") {
@@ -245,15 +302,12 @@ private struct ProjectRowView: View {
     }
 }
 
-/// A parked project in the Archived section. The whole row is the restore
-/// Button (the `WorkspaceRowView` pattern again), with a leading Restore
-/// swipe as the mirror of the project row's trailing Archive swipe. The
-/// hover-revealed ellipsis and the context menu also carry Remove, which
-/// keeps its confirmation — that one really does forget the rows. The path
-/// sits under the name because two parked projects can easily share one.
-private struct ArchivedProjectRowView: View {
+/// A hidden project. Showing it brings back its saved rows and selects its
+/// first session. The path distinguishes projects with the same folder name.
+private struct HiddenProjectRowView: View {
     let store: AppStore
     let archived: ArchivedProject
+    var onShow: () -> Void
 
     @State private var isHovered = false
 
@@ -261,6 +315,7 @@ private struct ArchivedProjectRowView: View {
         HStack(spacing: 0) {
             Button {
                 store.restoreProject(archived.path)
+                onShow()
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "folder")
@@ -281,7 +336,7 @@ private struct ArchivedProjectRowView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Restore \u{201C}\(archived.name)\u{201D}")
+            .help("Show \u{201C}\(archived.name)\u{201D} in sidebar")
 
             Menu {
                 menuItems
@@ -303,8 +358,9 @@ private struct ArchivedProjectRowView: View {
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             Button {
                 store.restoreProject(archived.path)
+                onShow()
             } label: {
-                Label("Restore", systemImage: "tray.and.arrow.up")
+                Label("Show in Sidebar", systemImage: "eye")
             }
             .tint(Theme.accent)
         }
@@ -314,8 +370,9 @@ private struct ArchivedProjectRowView: View {
     /// presentations can never drift apart.
     @ViewBuilder
     private var menuItems: some View {
-        Button("Restore Project") {
+        Button("Show in Sidebar") {
             store.restoreProject(archived.path)
+            onShow()
         }
         Button("Remove Project…") {
             if Dialogs.confirmRemove(archived.project) {

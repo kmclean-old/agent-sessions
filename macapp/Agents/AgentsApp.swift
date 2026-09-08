@@ -236,7 +236,7 @@ struct AgentsApp: App {
                 }
                 .keymapShortcut(.addProject, bindings: shortcuts.bindings)
 
-                Button("Archive Project") {
+                Button("Hide Project") {
                     actions.perform(.archiveProject)
                 }
                 .keymapShortcut(.archiveProject, bindings: shortcuts.bindings)

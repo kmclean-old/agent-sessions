@@ -80,7 +80,7 @@ extension AppAction {
         case .renameSession: return "Rename Session…"
         case .closeWindow: return "Close Window"
         case .addProject: return "Add Project…"
-        case .archiveProject: return "Archive Project"
+        case .archiveProject: return "Hide Project"
         case .removeProject: return "Remove Project…"
         case .previousSession: return "Previous Session"
         case .nextSession: return "Next Session"
