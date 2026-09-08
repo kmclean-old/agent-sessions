@@ -165,7 +165,7 @@ final class OverlayCenter: ObservableObject {
     /// the session's own variables win over it, so a request cannot re-point
     /// the review at another session or another app instance.
     func present(
-        command: String, workingDirectory: String, sessionID: String,
+        command: String, arguments: [String] = [], workingDirectory: String, sessionID: String,
         environment: [String: String] = [:]
     ) throws {
         guard active[sessionID] == nil else { throw PresentError.alreadyActive }
@@ -184,7 +184,7 @@ final class OverlayCenter: ObservableObject {
             workingDirectory: workingDirectory,
             envVars: environment.merging(TerminalCenter.sessionEnvVars(for: sessionID)) { _, session in session },
             command: Self.surfaceCommand(
-                wrapper: wrapperPath, token: proxy.completionToken, running: command
+                wrapper: wrapperPath, token: proxy.completionToken, running: command, arguments: arguments
             )
             // No `waitAfterCommand`: the runtime holds a surface spawned with
             // a command open regardless, and the option can only agree with
@@ -207,8 +207,10 @@ final class OverlayCenter: ObservableObject {
     /// so each word is quoted for bash — and the paths need it: a Debug build
     /// is "Agents Dev.app", space included, and the launcher's script lives
     /// under `TMPDIR`, whose value is nobody's promise.
-    static func surfaceCommand(wrapper: String, token: String, running command: String) -> String {
-        "\(shellQuoted(wrapper)) \(shellQuoted(token)) \(shellQuoted(command))"
+    static func surfaceCommand(
+        wrapper: String, token: String, running command: String, arguments: [String] = []
+    ) -> String {
+        ([wrapper, token, command] + arguments).map(shellQuoted).joined(separator: " ")
     }
 
     /// Single-quotes `value` for bash: the one quoting form in which nothing

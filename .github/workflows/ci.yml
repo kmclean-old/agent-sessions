@@ -32,7 +32,7 @@ jobs:
         # macos-26 runners are arm64, so brew lands these in
         # /opt/homebrew/bin — the first fallback candidate every resolver
         # in this repo (Swift and CLI alike) already checks.
-        run: brew install xcodegen borkdude/brew/babashka jj
+        run: brew install xcodegen borkdude/brew/babashka jj jq
 
       - name: CLI behavioral tests
         run: bb cli-test

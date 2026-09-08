@@ -6,9 +6,9 @@ import Foundation
 /// running *inside* one of this app's terminals ask the app to do something
 /// that process cannot do for itself.
 ///
-/// Two verbs. `overlay-run` drives `OverlayCenter` on behalf of the revdiff
-/// launcher — see that type for why a review TUI cannot simply draw into
-/// the terminal that asked for it. `session-event` is how
+/// `review-open` acknowledges an app-owned review immediately; `review-submit`
+/// delivers annotations on the user's submit action. `overlay-run` retains
+/// the blocking protocol for older launchers. `session-event` is how
 /// `hooks/agents-status.sh` reports what the agent in one pane is doing:
 /// its attention state and its resumable session (see
 /// `ControlSessionEvent`). The hook used to write those facts as OSC 777
@@ -45,10 +45,8 @@ import Foundation
 /// always finds its own instance directly — no discovery, no guessing, no
 /// cross-build mixups, and no cross-instance contention.
 ///
-/// The connection is the completion signal: the server holds it open for the
-/// life of the overlay and writes its reply only once the command has exited.
-/// A caller blocks on a socket read instead of polling for a sentinel file,
-/// and a caller that dies takes nothing with it.
+/// Only the legacy `overlay-run` verb holds its connection until exit.
+/// Review launch and submission each use one short request and reply.
 final class ControlServer: @unchecked Sendable {
     /// Absolute path of this process's socket.
     ///
@@ -105,6 +103,8 @@ final class ControlServer: @unchecked Sendable {
         /// Finder-launched app has the bare system PATH, and revdiff spawns
         /// jj/git/hg by name). Optional for a launcher that predates it.
         let env: [String: String]?
+        let args: [String]?
+        let review: UUID?
         // session-event
         let pane: String?
         let event: String?
@@ -117,7 +117,7 @@ final class ControlServer: @unchecked Sendable {
         let agentHome: String?
 
         private enum CodingKeys: String, CodingKey {
-            case cmd, session, command, cwd, env, pane, event, status, agent, prompt
+            case cmd, session, command, cwd, env, args, review, pane, event, status, agent, prompt
             case agentSessionID = "agent_session_id"
             case agentHome = "agent_home"
         }
@@ -132,6 +132,8 @@ final class ControlServer: @unchecked Sendable {
         case refuse(String)
         case run(command: String, cwd: String, session: String, env: [String: String])
         case sessionEvent(ControlSessionEvent)
+        case reviewOpen(ReviewRequest)
+        case reviewSubmit(session: String, review: UUID)
     }
 
     static func decide(line: String) -> RequestDecision {
@@ -141,8 +143,27 @@ final class ControlServer: @unchecked Sendable {
         switch request.cmd {
         case "overlay-run": return decideOverlayRun(request)
         case "session-event": return decideSessionEvent(request)
+        case "review-open": return decideReviewOpen(request)
+        case "review-submit":
+            guard let session = request.session, !session.isEmpty else { return .refuse("missing session") }
+            guard let review = request.review else { return .refuse("missing review") }
+            return .reviewSubmit(session: session, review: review)
         default: return .refuse("unknown cmd: \(request.cmd)")
         }
+    }
+
+    private static func decideReviewOpen(_ request: Request) -> RequestDecision {
+        guard let session = request.session, !session.isEmpty else { return .refuse("missing AGENTS_SESSION_ID") }
+        guard let paneString = request.pane, let pane = UUID(uuidString: paneString) else {
+            return .refuse("missing or malformed AGENTS_PANE_ID")
+        }
+        guard let command = request.command, command.hasPrefix("/") else {
+            return .refuse("review command must be an absolute executable path")
+        }
+        return .reviewOpen(ReviewRequest(
+            session: session, pane: pane, command: command, arguments: request.args ?? [],
+            workingDirectory: request.cwd ?? NSHomeDirectory(), environment: request.env ?? [:]
+        ))
     }
 
     private static func decideOverlayRun(_ request: Request) -> RequestDecision {
@@ -242,14 +263,18 @@ final class ControlServer: @unchecked Sendable {
     /// than two that can disagree.
     @MainActor private var pendingClients: [String: Int32] = [:]
 
-    init(overlays: OverlayCenter, socketPath: String = ControlServer.socketPath) {
+    private let reviews: ReviewController?
+
+    init(overlays: OverlayCenter, socketPath: String = ControlServer.socketPath, reviews: ReviewController? = nil) {
         self.overlays = overlays
         self.path = socketPath
+        self.reviews = reviews
     }
 
     @MainActor
     func start() {
         overlays.onClosed = { [weak self] sessionID, outcome in
+            self?.reviews?.closed(session: sessionID, outcome: outcome)
             switch outcome {
             case .finished:
                 self?.completePending(forSession: sessionID, ok: true, error: nil)
@@ -272,8 +297,9 @@ final class ControlServer: @unchecked Sendable {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reviews?.shutdown() }
             self?.stop()
         }
     }
@@ -448,6 +474,16 @@ final class ControlServer: @unchecked Sendable {
             serveOverlayRun(client: client, command: command, cwd: cwd, session: session, env: env)
         case .sessionEvent(let event):
             serveSessionEvent(client: client, event: event)
+        case .reviewOpen(let request):
+            serveAction(client: client, session: request.session) { server in
+                guard let reviews = server.reviews else { return "review delivery is not wired" }
+                return reviews.open(request)
+            }
+        case .reviewSubmit(let session, let review):
+            serveAction(client: client, session: session) { server in
+                guard let reviews = server.reviews else { return "review delivery is not wired" }
+                return reviews.submit(session: session, review: review)
+            }
         }
     }
 
@@ -455,24 +491,27 @@ final class ControlServer: @unchecked Sendable {
     /// holds the agent's next step until then, so this must never wait on
     /// anything but the main actor.
     private func serveSessionEvent(client: Int32, event: ControlSessionEvent) {
+        serveAction(client: client, session: event.session) { server in
+            guard let apply = server.applySessionEvent else { return "session events are not wired" }
+            return apply(event)
+        }
+    }
+
+    private func serveAction(
+        client: Int32, session: String,
+        action: @escaping @MainActor (ControlServer) -> String?
+    ) {
         Task { @MainActor [weak self] in
             guard let self else {
                 close(client)
                 return
             }
-            guard self.validateSession?(event.session) == true else {
-                self.reply(to: client, ok: false, error: "unknown session: \(event.session)", closing: true)
+            guard self.validateSession?(session) == true else {
+                self.reply(to: client, ok: false, error: "unknown session: \(session)", closing: true)
                 return
             }
-            guard let apply = self.applySessionEvent else {
-                self.reply(to: client, ok: false, error: "session events are not wired", closing: true)
-                return
-            }
-            if let error = apply(event) {
-                self.reply(to: client, ok: false, error: error, closing: true)
-            } else {
-                self.reply(to: client, ok: true, error: nil, closing: true)
-            }
+            let error = action(self)
+            self.reply(to: client, ok: error == nil, error: error, closing: true)
         }
     }
 

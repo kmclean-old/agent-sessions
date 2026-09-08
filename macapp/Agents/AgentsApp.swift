@@ -82,7 +82,16 @@ struct AgentsApp: App {
         // construct their own against private paths.
         let overlays = OverlayCenter()
         self.overlays = overlays
-        let controlServer = ControlServer(overlays: overlays)
+        let reviews = ReviewController(
+            overlays: overlays, socketPath: ControlServer.socketPath,
+            origin: { [weak center] session, pane in center?.reviewOrigin(session: session, pane: pane) },
+            deliver: { [weak center] origin, message in
+                guard let center else { return "app is shutting down" }
+                return center.deliverReview(to: origin, message: message)
+            }
+        )
+        let controlServer = ControlServer(overlays: overlays, reviews: reviews)
+        center.onAgentExit = { [weak reviews] origin in reviews?.originEnded(origin) }
         self.controlServer = controlServer
         if !Self.isTestHost {
             controlServer.start()

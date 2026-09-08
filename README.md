@@ -459,6 +459,43 @@ such as `cdk () { CODEX_HOME=~/.codex-kira codex "$@"; }` — the hook file
 belongs under that home, and the restore banner's command will carry the
 same `CODEX_HOME=…` prefix, since that is where those sessions live.
 
-The script exits 0 and stays silent on anything it doesn't recognise, so it
-is harmless in terminals other than this app, and under agents that send it
-events it has no opinion about.
+The status hook exits 0 and stays silent on anything it doesn't recognise,
+so it is harmless in terminals other than this app, and under agents that
+send it events it has no opinion about.
+
+### RevDiff reviews
+
+Agents runs RevDiff in its own overlay. Opening a review returns immediately;
+the agent can end its turn without a background command waiting on you.
+Press `O` to submit annotations while keeping the review open, or quit to
+finish it. Agents delivers the feedback to the pane and agent session that
+requested the review. Switching panes does not change that destination.
+Interrupted reviews are discarded without waking the agent.
+
+New session shells export `AGENTS_REVDIFF_LAUNCHER`, the path to the launcher
+bundled with their app. Run it with the usual RevDiff arguments:
+
+```sh
+"$AGENTS_REVDIFF_LAUNCHER" main --untracked --description="Review the change"
+```
+
+The launcher requires `jq`, like the status hook, and forwards the caller's
+tool and review environment. The status hook must identify the agent in the
+requesting pane. Feedback is pasted and submitted through that pane's terminal;
+there is no harness-specific background job or polling loop. Closing the pane,
+ending the agent, or replacing its session prevents further delivery.
+
+For the RevDiff plugin's existing launcher override, delegate before its normal
+terminal detection when the app provides a launcher:
+
+```sh
+if [ -n "${AGENTS_REVDIFF_LAUNCHER:-}" ]; then
+    exec "$AGENTS_REVDIFF_LAUNCHER" "$@"
+fi
+```
+
+The app keeps the older `overlay-run` socket verb for existing launchers. New
+launchers use `review-open` and `review-submit`, each with an immediate reply.
+Review submission and completion decisions live in `ReviewHandoff`;
+`ReviewController` performs the file and delivery effects, and `OverlayCenter`
+owns the terminal surface. Temporary review files are removed when it closes.

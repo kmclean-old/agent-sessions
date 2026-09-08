@@ -21,7 +21,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         var delegateProxy: SessionDelegateProxy
         var lastTitle: String?
         /// Live hook identity, including panes that do not own resume metadata.
-        var agent: String?
+        var agentSession: AgentSessionEvent?
+        var agent: String? { agentSession?.agent }
         /// When the pane is safe to type into — the surface built, the shell
         /// at its prompt — kept as a pure state machine so the transitions
         /// are unit-tested without a live surface (see `TerminalReadiness`).
@@ -66,6 +67,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     @Published private(set) var quiescedSessionIDs: Set<String> = []
 
     private let textDelivery: @MainActor (TerminalView, String) -> Void
+    private let promptDelivery: @MainActor (TerminalView, String) -> Bool
     /// How long after the first prompt signal to wait before typing — the
     /// title arrives from precmd, a moment before the line editor takes the
     /// tty into raw mode, and bytes landing in that gap are echoed twice.
@@ -90,11 +92,15 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                 NSLog("Agents: dropped typed text — the pane has no surface")
             }
         },
+        promptDelivery: @escaping @MainActor (TerminalView, String) -> Bool = { view, text in
+            view.paste(text: text) && view.sendKey(.enter)
+        },
         promptSettleDelay: TimeInterval = 0.1,
         promptFallbackDelay: TimeInterval = 3.0,
         loginShell: String = TerminalCenter.userLoginShell
     ) {
         self.textDelivery = textDelivery
+        self.promptDelivery = promptDelivery
         self.promptSettleDelay = promptSettleDelay
         self.promptFallbackDelay = promptFallbackDelay
         self.loginShell = loginShell
@@ -215,6 +221,9 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         if let paneID {
             env["AGENTS_PANE_ID"] = paneID.uuidString
         }
+        if let launcher = Bundle.main.url(forResource: "launch-revdiff", withExtension: "sh") {
+            env["AGENTS_REVDIFF_LAUNCHER"] = launcher.path
+        }
         return env
     }
 
@@ -251,6 +260,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// magic title that fail decoding are consumed by the delegate proxy
     /// and never arrive here or at the attention classifier.
     var onAgentSessionEvent: ((String, AgentSessionEvent, String?) -> Void)?
+    var onAgentExit: ((ReviewOrigin) -> Void)?
 
     /// Invoked with the session id at the START of every teardown path —
     /// `closeSession` and `quiesceSessions` — before the surface is freed.
@@ -466,6 +476,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// ARC is not used as the lifecycle boundary. Announces the closed pane
     /// afterward so `AppStore` drops its attention contribution.
     private func teardownPaneEntry(_ paneID: UUID) {
+        handleCommandFinished(paneID: paneID)
         guard let entry = panes.removeValue(forKey: paneID) else { return }
         entry.delegateProxy.suppressesProcessExit = true
         entry.view.delegate = nil
@@ -661,7 +672,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             entry.view.controller = nil
             entry.controller = nil
             entry.lastTitle = nil
-            entry.agent = nil
+            entry.agentSession = nil
             // The delegate was detached above, so the surface's own detach
             // callback never arrives: reset readiness by hand, or the banner
             // typed after resume could go to a surface that no longer exists
@@ -774,13 +785,43 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// does on every prompt.
     func handleAgentSessionEvent(sessionID: String, paneID: UUID, event: AgentSessionEvent) {
         if panes[paneID]?.sessionID == sessionID {
-            panes[paneID]?.agent = event.agent
+            if let previous = reviewOrigin(session: sessionID, pane: paneID),
+               event.name == "SessionEnd" || previous.agent != event.agent || previous.agentSessionID != event.sessionID {
+                handleCommandFinished(paneID: paneID)
+            }
+            panes[paneID]?.agentSession = event.name == "SessionEnd" ? nil : event
         }
         if let layout = layouts[sessionID], resumeDesignatePane(in: layout) != paneID {
             return
         }
         resumeAuthorship[sessionID] = .pane(paneID)
         onAgentSessionEvent?(sessionID, event, panes[paneID]?.lastTitle)
+    }
+
+    func reviewOrigin(session: String, pane: UUID) -> ReviewOrigin? {
+        guard let entry = panes[pane], entry.sessionID == session,
+              entry.controller != nil, !quiescedSessionIDs.contains(session),
+              let agent = entry.agentSession
+        else { return nil }
+        return ReviewOrigin(session: session, pane: pane, agent: agent.agent, agentSessionID: agent.sessionID)
+    }
+
+    /// The shell has regained its prompt; the former agent identity must
+    /// not authorize a later review submission into that shell.
+    func handleCommandFinished(paneID: UUID) {
+        let previous = panes[paneID].flatMap { reviewOrigin(session: $0.sessionID, pane: paneID) }
+        panes[paneID]?.agentSession = nil
+        if let previous { onAgentExit?(previous) }
+    }
+
+    /// Delivery stays in the pane that requested the review, even when a
+    /// sibling gains focus or becomes the session's resume designate.
+    func deliverReview(to origin: ReviewOrigin, message: String) -> String? {
+        guard reviewOrigin(session: origin.session, pane: origin.pane) == origin,
+              let entry = panes[origin.pane]
+        else { return "the agent that requested this review is no longer in its pane" }
+        guard promptDelivery(entry.view, message) else { return "the requesting pane cannot accept input" }
+        return nil
     }
 
     /// Applies one hook event delivered over the control socket, returning
@@ -840,6 +881,7 @@ final class SessionDelegateProxy:
     TerminalSurfaceDesktopNotificationDelegate,
     TerminalSurfaceBellDelegate,
     TerminalSurfaceProgressReportDelegate,
+    TerminalSurfaceCommandFinishedDelegate,
     TerminalSurfaceLifecycleDelegate
 {
     let sessionID: String
@@ -863,6 +905,10 @@ final class SessionDelegateProxy:
     func terminalDidClose(processAlive: Bool) {
         guard !suppressesProcessExit else { return }
         center?.handleProcessExit(paneID: paneID)
+    }
+
+    func terminalDidFinishCommand(exitCode: Int?, durationNanos: UInt64) {
+        center?.handleCommandFinished(paneID: paneID)
     }
 
     /// The surface — and with it the pty — now exists. This is the signal
