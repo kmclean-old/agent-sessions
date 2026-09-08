@@ -7,3 +7,6 @@
 
 # Fix up
 - archived and add project buttons are ugly and look misplaced
+- swipe gestures
+  - keep swipe left for archive project, that's cool
+  - add swipe right to keep changes on a workspace
