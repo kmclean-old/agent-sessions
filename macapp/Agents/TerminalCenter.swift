@@ -20,6 +20,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         var controller: TerminalController?
         var delegateProxy: SessionDelegateProxy
         var lastTitle: String?
+        /// Live hook identity, including panes that do not own resume metadata.
+        var agent: String?
         /// When the pane is safe to type into — the surface built, the shell
         /// at its prompt — kept as a pure state machine so the transitions
         /// are unit-tested without a live surface (see `TerminalReadiness`).
@@ -659,6 +661,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             entry.view.controller = nil
             entry.controller = nil
             entry.lastTitle = nil
+            entry.agent = nil
             // The delegate was detached above, so the surface's own detach
             // callback never arrives: reset readiness by hand, or the banner
             // typed after resume could go to a surface that no longer exists
@@ -738,6 +741,9 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         // was waiting on.
         let firstPrompt = entry.readiness.notePrompt()
         panes[paneID] = entry
+        if entry.agent == "codex", let status = CodexTitleStatus.parse(title) {
+            handleSessionSignal(sessionID: entry.sessionID, paneID: paneID, signal: .structured(status))
+        }
         if firstPrompt {
             deliverResumeHintWhenReady(for: entry.sessionID)
         }
@@ -767,6 +773,9 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// the NEW designate's agent next announces itself, which the hook
     /// does on every prompt.
     func handleAgentSessionEvent(sessionID: String, paneID: UUID, event: AgentSessionEvent) {
+        if panes[paneID]?.sessionID == sessionID {
+            panes[paneID]?.agent = event.agent
+        }
         if let layout = layouts[sessionID], resumeDesignatePane(in: layout) != paneID {
             return
         }

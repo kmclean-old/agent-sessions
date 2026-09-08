@@ -445,6 +445,15 @@ And Codex requires you to explicitly trust a hook before it will run one; run
 `/hooks` inside Codex to review and approve it. If you script the edit, write
 `hooks.json` in place, for the same reason as above.
 
+For a pane identified as Codex by its hooks, Agents also reads Codex's live
+title status. A leading working spinner clears attention; either blinking
+`Action Required` prefix raises it. This clears red when an approved command
+starts running, even though `PostToolUse` may wait for the command to finish.
+It also covers automatic approval review, which can trigger
+`PermissionRequest` without waiting for you. Keep `activity` first in Codex's
+terminal-title settings (the default in 0.153.4) to use this signal. If the
+title has no recognised status, the hook state remains in effect.
+
 If you run Codex through a wrapper that sets `CODEX_HOME` — a shell function
 such as `cdk () { CODEX_HOME=~/.codex-kira codex "$@"; }` — the hook file
 belongs under that home, and the restore banner's command will carry the

@@ -201,6 +201,71 @@ final class TerminalCenterPaneTests: XCTestCase {
 
     // MARK: - Attention aggregation and title routing
 
+    func testCodexResumingAfterApprovalClearsBlockedBeforePostToolUse() {
+        let center = TerminalCenter()
+        _ = makeSession(in: center)
+        let pane = center.layouts[sessionID]!.initialPane
+        var state = AttentionState()
+        center.onSessionSignal = { _, _, signal in
+            state = SessionAttention.reduce(state, signal, at: Date())
+        }
+        XCTAssertNil(center.handleControlSessionEvent(ControlSessionEvent(
+            session: sessionID, pane: pane, status: .set(.blocked),
+            event: AgentSessionEvent(agent: "codex", name: "PermissionRequest", sessionID: "codex-1", query: nil)
+        )))
+        XCTAssertEqual(state.activity, .blocked)
+
+        let delegate = proxy(forPane: pane, in: center)
+        delegate.terminalDidChangeTitle("[ ! ] Action Required | secrets")
+        delegate.terminalDidChangeTitle("[ . ] Action Required | secrets")
+        XCTAssertEqual(state.activity, .blocked)
+
+        delegate.terminalDidChangeTitle("⠙ secrets")
+        XCTAssertNil(state.activity, "A running command must clear red before its PostToolUse arrives.")
+        XCTAssertNil(state.since)
+        XCTAssertTrue(state.isStructured)
+
+        delegate.terminalDidChangeTitle("[ ! ] Action Required | secrets")
+        XCTAssertEqual(state.activity, .blocked, "A new prompt must still raise attention.")
+    }
+
+    func testCodexTitleSignalsStayWithTheirPaneRegardlessOfTitleOwnership() {
+        let center = TerminalCenter()
+        _ = makeSession(in: center)
+        let initial = center.layouts[sessionID]!.initialPane
+        let codexPane = center.splitPane(in: sessionID, axis: .horizontal, workingDirectory: "/tmp")!
+        _ = center.splitPane(in: sessionID, axis: .vertical, workingDirectory: "/tmp")!
+        center.handleAgentSessionEvent(sessionID: sessionID, paneID: codexPane,
+            event: AgentSessionEvent(agent: "codex", name: "SessionStart", sessionID: "codex-1", query: nil))
+        var signals: [(pane: UUID, signal: AttentionSignal)] = []
+        center.onSessionSignal = { _, pane, signal in signals.append((pane, signal)) }
+
+        proxy(forPane: initial, in: center).terminalDidChangeTitle("⠙ secrets")
+        proxy(forPane: codexPane, in: center).terminalDidChangeTitle("⠙ secrets")
+        XCTAssertEqual(signals.map(\.pane), [codexPane])
+        XCTAssertEqual(signals.map(\.signal), [.structured(.clear)])
+
+        center.handleAgentSessionEvent(sessionID: sessionID, paneID: codexPane,
+            event: AgentSessionEvent(agent: "claude", name: "SessionStart", sessionID: "claude-1", query: nil))
+        proxy(forPane: codexPane, in: center).terminalDidChangeTitle("⠹ secrets")
+        XCTAssertEqual(signals.count, 1, "A replacement agent must not inherit Codex title interpretation.")
+    }
+
+    func testQuiesceDropsCodexTitleIdentityBeforeThePaneIsReused() async {
+        let center = TerminalCenter()
+        _ = makeSession(in: center)
+        let pane = center.layouts[sessionID]!.initialPane
+        center.handleAgentSessionEvent(sessionID: sessionID, paneID: pane,
+            event: AgentSessionEvent(agent: "codex", name: "SessionStart", sessionID: "codex-1", query: nil))
+        await center.quiesceSessions([sessionID])
+        center.resumeSessions([sessionID])
+        _ = makeSession(in: center)
+        var signals: [AttentionSignal] = []
+        center.onSessionSignal = { _, _, signal in signals.append(signal) }
+        proxy(forPane: pane, in: center).terminalDidChangeTitle("⠙ secrets")
+        XCTAssertTrue(signals.isEmpty)
+    }
+
     func testSignalsFromEveryPaneAggregateToTheOneSessionRow() {
         let center = TerminalCenter()
         _ = makeSession(in: center)
