@@ -51,9 +51,8 @@ final class ShortcutRouter {
         }
         if capture(event) { return nil }
         guard event.type == .keyDown else { return event }
-        // Cheap fast-path: every shortcut in Keymap is ⌘-based, so plain
-        // typing never pays the matching cost.
-        guard event.modifierFlags.contains(.command) else {
+        // Plain typing, including Shift, belongs to the focused responder.
+        guard !event.modifierFlags.intersection(Shortcut.requiredModifiers).isEmpty else {
             return event
         }
         guard let action = Keymap.action(for: event, in: bindings()) else {

@@ -110,7 +110,7 @@ struct AgentsApp: App {
             store: store,
             uiState: uiState,
             panes: center,
-            suppressShortcut: { shortcutCapture.suppresses($0) }
+            suppressShortcut: { shortcutCapture.handle($0) }
         )
         self.actions = actions
         let router = ShortcutRouter(

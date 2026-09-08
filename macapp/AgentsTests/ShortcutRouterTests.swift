@@ -104,4 +104,20 @@ final class ShortcutRouterTests: XCTestCase {
         XCTAssertNotNil(router.handle(keyEvent(characters: "J", modifiers: [.command, .shift])))
         XCTAssertEqual(performed, [.newSession])
     }
+
+    func test_controlAndOptionBindingsConsumeOnlyAssignedCombinations() {
+        for modifiers: NSEvent.ModifierFlags in [.control, .option, [.control, .shift]] {
+            var performed: [AppAction] = []
+            let router = ShortcutRouter(
+                perform: { performed.append($0); return true },
+                isModalActive: { false },
+                bindings: { [.focusPaneLeft: Shortcut(key: .leftArrow, modifiers: modifiers)] }
+            )
+            XCTAssertNil(router.handle(keyEvent(characters: "\u{F702}", modifiers: modifiers, keyCode: 123)))
+            XCTAssertNotNil(router.handle(keyEvent(characters: "\u{F703}", modifiers: modifiers, keyCode: 124)))
+            XCTAssertNotNil(router.handle(keyEvent(characters: "t", modifiers: [])))
+            XCTAssertNotNil(router.handle(keyEvent(characters: "T", modifiers: .shift)))
+            XCTAssertEqual(performed, [.focusPaneLeft])
+        }
+    }
 }

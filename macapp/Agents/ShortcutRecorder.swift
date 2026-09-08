@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Shared by the recorder, event monitor and action dispatcher. AppKit can
-/// dispatch a menu equivalent even after a local monitor consumes the event,
-/// so remember the captured keydown after recording ends as well.
+/// The recorder, event monitor and menu dispatcher all deliver keys here.
+/// Remember the captured keydown after recording ends so a second delivery
+/// cannot execute the shortcut that was just recorded.
 @MainActor
 final class ShortcutCapture: ObservableObject {
     @Published private(set) var action: AppAction?
@@ -90,7 +90,7 @@ struct ShortcutRecorder: NSViewRepresentable {
         button.title = recording ? "Type shortcut…" : shortcut?.displayString ?? "Record Shortcut"
         button.setAccessibilityLabel("\(action.helpTitle) shortcut")
         button.setAccessibilityValue(recording ? "Recording" : shortcut?.displayString ?? "Not assigned")
-        button.toolTip = "Click, then type a shortcut containing Command (⌘). Escape cancels recording."
+        button.toolTip = "Click, then type a shortcut with Command (⌘), Control (⌃) or Option (⌥). Escape cancels recording."
     }
 
     static func dismantleNSView(_ button: ShortcutRecorderButton, coordinator: ()) {

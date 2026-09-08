@@ -15,7 +15,7 @@ final class ShortcutEditor: ObservableObject {
 
     func record(_ event: NSEvent, for action: AppAction, capture: ShortcutCapture) {
         guard let shortcut = Shortcut(event: event) else {
-            recordingError = "Use a letter, number, symbol or arrow key with Command (⌘)."
+            recordingError = "Use a letter, number, symbol or arrow key."
             return
         }
         if let reason = ShortcutPreferences.invalidReason(for: shortcut) {

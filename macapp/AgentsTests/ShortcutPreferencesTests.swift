@@ -47,6 +47,7 @@ final class ShortcutPreferencesTests: XCTestCase {
     func test_invalidAndReservedShortcutsAreRejected() {
         for shortcut in [
             Shortcut(key: .char("t"), modifiers: []),
+            Shortcut(key: .char("t"), modifiers: .shift),
             Shortcut(key: .char("c"), modifiers: .command),
             Shortcut(key: .char("q"), modifiers: .command),
             Shortcut(key: .char("\r"), modifiers: .command),
@@ -54,6 +55,18 @@ final class ShortcutPreferencesTests: XCTestCase {
             XCTAssertNotNil(ShortcutPreferences.invalidReason(for: shortcut))
         }
         XCTAssertNil(ShortcutPreferences.invalidReason(for: Shortcut(key: .char("j"), modifiers: [.command, .control])))
+    }
+
+    func test_controlAndOptionShortcutsPersistWithoutCommand() {
+        withDefaults { defaults in
+            let preferences = ShortcutPreferences(defaults: defaults)
+            var draft = preferences.bindings
+            draft[.focusPaneLeft] = Shortcut(key: .leftArrow, modifiers: [.control, .shift])
+            draft[.focusPaneRight] = Shortcut(key: .rightArrow, modifiers: .option)
+            draft[.renameSession] = Shortcut(key: .char("r"), modifiers: .control)
+            XCTAssertTrue(preferences.save(draft))
+            XCTAssertEqual(ShortcutPreferences(defaults: defaults).bindings, draft)
+        }
     }
 
     func test_corruptPreferencesFallBackAndUnknownActionsAreIgnored() {

@@ -137,6 +137,8 @@ struct Shortcut: Hashable, Codable {
     /// numeric pad, function, ...) never break a match.
     static let relevantModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
 
+    static let requiredModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+
     init(key: Key, modifiers: NSEvent.ModifierFlags) {
         if case .char(let character) = key {
             self.key = .char(Character(String(character).lowercased()))

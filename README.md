@@ -30,8 +30,9 @@ whenever you need it.
 ## Keyboard shortcuts
 
 Open **Help ▸ Keyboard Shortcuts** (⇧⌘? by default), click a shortcut, and
-press the new combination. Shortcuts must include Command (⌘); standard
-macOS commands such as Copy, Paste, and Quit are reserved. Conflicting app
+press the new combination. Shortcuts must include Command (⌘), Control (⌃)
+or Option (⌥), so plain typing and Shift-only typing still reach the terminal.
+Standard macOS commands such as Copy, Paste, and Quit are reserved. Conflicting app
 shortcuts show the other action's name and must be resolved before saving.
 
 **Save** applies all edits immediately and remembers them across launches.

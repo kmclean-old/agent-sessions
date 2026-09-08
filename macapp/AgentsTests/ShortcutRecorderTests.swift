@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import Agents
 
@@ -8,6 +9,12 @@ final class ShortcutRecorderTests: XCTestCase {
         var received = 0
         override var acceptsFirstResponder: Bool { true }
         override func keyDown(with event: NSEvent) { received += 1 }
+    }
+
+    private final class MenuTarget: NSObject {
+        let perform: () -> Void
+        init(perform: @escaping () -> Void) { self.perform = perform }
+        @objc func invoke(_ sender: Any?) { perform() }
     }
 
     private func event(
@@ -60,7 +67,7 @@ final class ShortcutRecorderTests: XCTestCase {
 
         let (store, _, _) = TestSupport.makeStore()
         let uiState = UIState()
-        let actions = AppActions(store: store, uiState: uiState, currentEvent: { key }, suppressShortcut: { capture.suppresses($0) })
+        let actions = AppActions(store: store, uiState: uiState, currentEvent: { key }, suppressShortcut: { capture.handle($0) })
         XCTAssertTrue(actions.perform(.showShortcutHelp))
         XCTAssertFalse(uiState.showShortcutHelp, "The menu's duplicate dispatch must not execute an action")
     }
@@ -119,6 +126,8 @@ final class ShortcutRecorderTests: XCTestCase {
         for (index, key) in [
             event(in: window, characters: "?", modifiers: [.command, .shift], keyCode: 44),
             event(in: window, characters: "\u{F702}", modifiers: [.command, .option, .shift], keyCode: 123, timestamp: 2),
+            event(in: window, characters: "h", modifiers: .control, keyCode: 4, timestamp: 3),
+            event(in: window, characters: "\u{F702}", modifiers: .option, keyCode: 123, timestamp: 4),
         ].enumerated() {
             if index > 0 { button.startRecording() }
             XCTAssertTrue(capture.handle(key))
@@ -156,5 +165,82 @@ final class ShortcutRecorderTests: XCTestCase {
         }
         XCTAssertEqual(captured, 1)
         XCTAssertEqual(sink.received, 0, "A nil handler result must remain nil at the installed monitor boundary")
+    }
+
+    func test_hostedEditorRecordsCommandShortcutAfterInvalidAttempt() async throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let preferences = ShortcutPreferences(defaults: defaults)
+        let capture = ShortcutCapture()
+        let hosting = NSHostingView(rootView: ShortcutHelpView(preferences: preferences, capture: capture))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 650), styleMask: .titled, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        func recorders(in view: NSView) -> [ShortcutRecorderButton] {
+            (view as? ShortcutRecorderButton).map { [$0] } ?? view.subviews.flatMap { recorders(in: $0) }
+        }
+
+        let button = try XCTUnwrap(recorders(in: hosting).first { $0.shortcutAction == .focusPaneLeft })
+        button.performClick(nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(capture.action, .focusPaneLeft)
+        XCTAssertTrue(window.firstResponder === button)
+        XCTAssertEqual(button.title, "Type shortcut…")
+
+        XCTAssertTrue(window.performKeyEquivalent(with: event(in: window, modifiers: [])))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(capture.action, .focusPaneLeft)
+        XCTAssertTrue(window.firstResponder === button)
+
+        let shortcut = event(in: window, characters: "j", modifiers: [.command, .shift], keyCode: 38, timestamp: 2)
+        XCTAssertTrue(window.performKeyEquivalent(with: shortcut))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(capture.action)
+        XCTAssertEqual(button.title, Shortcut(key: .char("j"), modifiers: [.command, .shift]).displayString)
+
+        let router = ShortcutRouter(
+            perform: { _ in XCTFail("Recording must precede actions"); return true },
+            isModalActive: { false }, capture: { capture.handle($0) }
+        )
+        router.install()
+        button.performClick(nil)
+        try await Task.sleep(for: .milliseconds(50))
+        let arrow = event(in: window, characters: "\u{F702}", modifiers: [.command, .control], keyCode: 123, timestamp: 3)
+        withExtendedLifetime(router) { NSApp.sendEvent(arrow) }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(capture.action)
+        XCTAssertEqual(button.title, Shortcut(key: .leftArrow, modifiers: [.command, .control]).displayString)
+    }
+
+    func test_menuKeyEquivalentRecordsBeforeLocalMonitorReceivesEvent() {
+        let (window, button, capture, editor) = fixture()
+        defer { window.close() }
+        var recorded = 0
+        button.onRecord = {
+            recorded += 1
+            editor.record($0, for: .renameSession, capture: capture)
+        }
+        let key = event(in: window)
+        let (store, _, _) = TestSupport.makeStore()
+        let uiState = UIState()
+        let actions = AppActions(store: store, uiState: uiState, currentEvent: { key }, suppressShortcut: { capture.handle($0) })
+        let menu = NSMenu()
+        let target = MenuTarget { actions.perform(.showShortcutHelp) }
+        let item = NSMenuItem(title: "Show Shortcuts", action: #selector(MenuTarget.invoke(_:)), keyEquivalent: "t")
+        item.keyEquivalentModifierMask = .command
+        item.target = target
+        menu.addItem(item)
+
+        XCTAssertTrue(menu.performKeyEquivalent(with: key))
+        XCTAssertFalse(uiState.showShortcutHelp)
+        XCTAssertNil(capture.action, "A menu that receives the key first must also finish recording")
+        XCTAssertEqual(editor.bindings[.renameSession], Keymap.standard[.newSession])
+        XCTAssertTrue(capture.handle(key))
+        XCTAssertTrue(menu.performKeyEquivalent(with: key))
+        XCTAssertEqual(recorded, 1)
+        XCTAssertFalse(uiState.showShortcutHelp)
     }
 }

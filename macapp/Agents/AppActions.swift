@@ -88,8 +88,8 @@ final class AppActions {
         guard let event = currentEvent(), event.type == .keyDown else {
             return dispatch(action)
         }
-        // A recorder may have consumed this keydown and already finished.
-        // Suppress its menu dispatch too, before it can execute any action.
+        // Menu dispatch may reach the recorder before the event monitor.
+        // Capture the key, or consume a duplicate, before executing an action.
         if suppressShortcut(event) { return true }
         if let last = lastKeyDispatch, last.action == action, last.timestamp == event.timestamp {
             return true

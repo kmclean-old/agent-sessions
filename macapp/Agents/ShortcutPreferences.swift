@@ -61,14 +61,14 @@ final class ShortcutPreferences: ObservableObject {
     }
 
     static func invalidReason(for shortcut: Shortcut) -> String? {
-        guard shortcut.modifiers.contains(.command) else {
-            return "Include Command (⌘) in the shortcut."
+        guard !shortcut.modifiers.intersection(Shortcut.requiredModifiers).isEmpty else {
+            return "Include Command (⌘), Control (⌃) or Option (⌥) in the shortcut."
         }
         if case .char(let character) = shortcut.key,
            character.unicodeScalars.contains(where: {
                CharacterSet.controlCharacters.contains($0) || (0xF700...0xF8FF).contains($0.value)
            }) {
-            return "Use a letter, number, symbol or arrow key with Command (⌘)."
+            return "Use a letter, number, symbol or arrow key."
         }
         if let name = reserved[shortcut] {
             return "Reserved for \(name)."

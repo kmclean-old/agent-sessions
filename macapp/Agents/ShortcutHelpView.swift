@@ -23,7 +23,7 @@ struct ShortcutHelpView: View {
                 Text("Keyboard Shortcuts")
                     .font(.title2)
                     .fontWeight(.semibold)
-                Text("Click a shortcut, then press a new combination including Command (⌘).")
+                Text("Click a shortcut, then press a combination with Command (⌘), Control (⌃) or Option (⌥).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
