@@ -262,8 +262,8 @@ extension SessionResumeMetadata {
     ///   untested here, so any other login shell gets no heading rather
     ///   than a pane that silently lost its integration.
     /// - A surface spawned with a command is held open after that command
-    ///   exits (`wait-after-command`, forced on by the runtime — see
-    ///   `OverlayCenter`): a restored pane whose shell exits shows Ghostty's
+    ///   exits (`wait-after-command`, forced on by the runtime): a restored
+    ///   pane whose shell exits shows Ghostty's
     ///   "Process exited" line and closes on the next keypress, where a
     ///   fresh pane closes at once. The price of the heading.
     static func restoreShellCommand(for metadata: SessionResumeMetadata, loginShell: String) -> String? {

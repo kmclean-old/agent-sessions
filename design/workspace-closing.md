@@ -166,4 +166,4 @@ attention while the workspace close itself remains successful.
    no changes, automatic reconciliation, overlap attention, and concurrent
    repository activity.
 5. Review the complete diff in the main loop, delegate repairs, run focused
-   CLI and macOS verification, then complete interactive RevDiff review.
+   CLI and macOS verification, then review in a separate terminal session.

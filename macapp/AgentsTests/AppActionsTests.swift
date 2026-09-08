@@ -32,7 +32,6 @@ private func makeActions(
     store: AppStore,
     uiState: UIState? = nil,
     panes: SpyPanes? = nil,
-    reviewSessions: @escaping () -> Set<String> = { [] },
     dialogs: FakeDialogs? = nil,
     currentEvent: @escaping () -> NSEvent? = { nil }
 ) -> AppActions {
@@ -40,7 +39,6 @@ private func makeActions(
         store: store,
         uiState: uiState ?? UIState(),
         panes: panes,
-        reviewSessions: reviewSessions,
         dialogs: dialogs ?? FakeDialogs(),
         present: { $0() },
         currentEvent: currentEvent
@@ -658,25 +656,6 @@ final class AppActionsTests: XCTestCase {
             actions.perform(.focusPaneLeft),
             "focus stopped at a layout edge must report unhandled — the shortcut should fall through to the system rather than pretend focus moved"
         )
-    }
-
-    func test13f_paneActionsRefuseWhileTheSelectedSessionHasAnOpenReview() {
-        let (store, _, _) = TestSupport.makeStore()
-        let panes = SpyPanes()
-        var reviews: Set<String> = []
-        let actions = makeActions(store: store, panes: panes, reviewSessions: { reviews })
-        store.addProject(path: "/tmp/proj-A")
-        reviews = [store.selection!]
-
-        XCTAssertFalse(actions.perform(.splitPaneRight), "a review covers the session's whole pane area — ⌘D would spawn a shell behind it that the user never asked to see")
-        XCTAssertFalse(actions.perform(.closePane), "⌥⌘W during a review would kill a pane the user cannot currently see")
-        XCTAssertFalse(actions.perform(.focusPaneLeft), "focus moves during a review would silently change which pane appears when the review exits")
-        XCTAssertTrue(panes.splitCalls.isEmpty)
-        XCTAssertTrue(panes.closeCalls.isEmpty)
-        XCTAssertTrue(panes.moveCalls.isEmpty)
-
-        reviews = []
-        XCTAssertTrue(actions.perform(.splitPaneRight), "the refusal must be scoped to the open review — the moment it exits, pane commands work again")
     }
 
     func test13e_paneActionsAreUnhandledWithNoPaneCommander() {

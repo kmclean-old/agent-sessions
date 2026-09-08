@@ -22,11 +22,8 @@
   ;; unrelated-looking glitches minutes later. The cost is a second full
   ;; build the first time; the alternative was observed breaking a live app
   ;; mid-use (2026-08-31).
-  review-test {:doc "Test detached review launch and submission"
-               :task (shell "python3" "scripts/test-review-launcher.py")}
-
-  test {:doc "Test review scripts and run the AgentsTests suite"
-        :depends [gen review-test]
+  test {:doc "Run the AgentsTests suite"
+        :depends [gen]
         :task (shell "xcodebuild" "-project" "macapp/Agents.xcodeproj"
                       "-scheme" "Agents" "-destination" "platform=macOS"
                       "-derivedDataPath" "macapp/.build-tests" "test")}

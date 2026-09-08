@@ -14,15 +14,6 @@ final class AppActions {
     /// pane action just reports unhandled.
     private weak var panes: (any PaneCommanding)?
 
-    /// The sessions with an open review overlay (`OverlayCenter
-    /// .reviewSessionIDs` in production; `{ [] }` default for tests that
-    /// don't care). Pane commands consult this because a review covers the
-    /// session's ENTIRE pane area: with one open, every pane is invisible,
-    /// so ⌘D would spawn a shell behind the review, ⌥⌘W would kill a pane
-    /// the user cannot see, and focus moves would silently change what
-    /// appears when the review exits. All of them refuse instead.
-    private let reviewSessions: () -> Set<String>
-
     private let dialogs: any DialogPresenting
 
     /// Schedules dialog presentation one runloop turn after `perform`
@@ -56,7 +47,6 @@ final class AppActions {
         store: AppStore,
         uiState: UIState,
         panes: (any PaneCommanding)? = nil,
-        reviewSessions: @escaping () -> Set<String> = { [] },
         dialogs: any DialogPresenting = LiveDialogPresenter(),
         present: @escaping (@escaping () -> Void) -> Void = { work in DispatchQueue.main.async(execute: work) },
         currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent },
@@ -65,7 +55,6 @@ final class AppActions {
         self.store = store
         self.uiState = uiState
         self.panes = panes
-        self.reviewSessions = reviewSessions
         self.dialogs = dialogs
         self.present = present
         self.currentEvent = currentEvent
@@ -227,9 +216,7 @@ final class AppActions {
             return splitSelectedSession(axis: .vertical)
 
         case .closePane:
-            guard let selection = store.selection, !reviewSessions().contains(selection) else {
-                return false
-            }
+            guard let selection = store.selection else { return false }
             return panes?.closeFocusedPane(in: selection) ?? false
 
         case .focusPaneLeft:
@@ -256,7 +243,6 @@ final class AppActions {
     /// close race) is unhandled.
     private func splitSelectedSession(axis: SplitAxis) -> Bool {
         guard let selection = store.selection,
-              !reviewSessions().contains(selection),
               let row = store.sessions.first(where: { $0.id == selection })
         else { return false }
         return panes?.splitPane(
@@ -269,9 +255,7 @@ final class AppActions {
     /// Reports false at a layout edge so the unmatched shortcut falls back
     /// to the system (beep) instead of pretending focus moved.
     private func moveSelectedSessionFocus(_ direction: FocusDirection) -> Bool {
-        guard let selection = store.selection, !reviewSessions().contains(selection) else {
-            return false
-        }
+        guard let selection = store.selection else { return false }
         return panes?.moveFocus(in: selection, direction: direction) ?? false
     }
 

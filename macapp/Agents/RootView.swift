@@ -7,7 +7,6 @@ struct RootView: View {
     @EnvironmentObject private var shortcutCapture: ShortcutCapture
     @ObservedObject var store: AppStore
     let center: TerminalCenter
-    @ObservedObject var overlays: OverlayCenter
     @ObservedObject var uiState: UIState
     @State private var isDashboardPresented = true
 
@@ -35,7 +34,7 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(store: store, overlays: overlays)
+            SidebarView(store: store)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: .infinity)
         } detail: {
             // The terminal host must always be present in the tree — even
@@ -43,13 +42,8 @@ struct RootView: View {
             // a live TerminalView blanks its Metal surface. The empty state
             // is an overlay on top, never a conditional swap.
             ZStack {
-                TerminalHostView(store: store, center: center, overlays: overlays)
+                TerminalHostView(store: store, center: center)
 
-                // Reviews are session-scoped, so with nothing selected
-                // nothing is on screen — any still-open review is mounted
-                // hidden inside the host and comes back when its session is
-                // reselected. The empty state can therefore key off the
-                // selection alone.
                 if store.selection == nil {
                     VStack(spacing: 12) {
                         Image(systemName: "terminal")

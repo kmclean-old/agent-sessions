@@ -1,5 +1,12 @@
 # Upstream a child-exited delegate to libghostty-spm and drop the overlay wrapper
 
+## Disposition
+
+Dropped on 2026-09-08: the app-owned review overlay and its wrapper have been
+removed. Review tools now run in ordinary terminal sessions or panes, so the
+app no longer needs an upstream child-exit callback to dismiss reviews.
+The original investigation is retained below for reference.
+
 ## Context
 
 Found while moving the review overlay onto `TerminalSurfaceOptions.command`

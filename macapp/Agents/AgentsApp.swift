@@ -22,7 +22,6 @@ final class UIState: ObservableObject {
 @main
 struct AgentsApp: App {
     let center: TerminalCenter
-    let overlays: OverlayCenter
     let controlServer: ControlServer
     let actions: AppActions
     let router: ShortcutRouter
@@ -70,28 +69,9 @@ struct AgentsApp: App {
         let center = TerminalCenter()
         self.center = center
 
-        // The overlay owner and its control channel are constructed here, and
-        // the socket starts listening immediately: a review can be requested
-        // by any session the moment that session exists, and a session can
-        // exist before the window is on screen (restored rows spawn eagerly).
-        // Binding later — in RootView's .task, say — would leave a window
-        // where the launcher finds no socket and reports the app as absent.
-        //
-        // Except under test: a test host must never listen on this build's
-        // socket namespace (see `isTestHost`) — tests that need a server
-        // construct their own against private paths.
-        let overlays = OverlayCenter()
-        self.overlays = overlays
-        let reviews = ReviewController(
-            overlays: overlays, socketPath: ControlServer.socketPath,
-            origin: { [weak center] session, pane in center?.reviewOrigin(session: session, pane: pane) },
-            deliver: { [weak center] origin, message in
-                guard let center else { return "app is shutting down" }
-                return center.deliverReview(to: origin, message: message)
-            }
-        )
-        let controlServer = ControlServer(overlays: overlays, reviews: reviews)
-        center.onAgentExit = { [weak reviews] origin in reviews?.originEnded(origin) }
+        // Hooks can report as soon as restored sessions start their shells.
+        // Test hosts use private servers and must not bind the live app's socket.
+        let controlServer = ControlServer()
         self.controlServer = controlServer
         if !Self.isTestHost {
             controlServer.start()
@@ -108,30 +88,14 @@ struct AgentsApp: App {
         let store = AppStore(terminals: center, stateURL: stateURL)
         _store = StateObject(wrappedValue: store)
 
-        // A review request must name a live session row; anything else is
-        // refused (no app-global fallback). Wired here, after the store
-        // exists — a request racing app construction is refused too, which
-        // is the correct answer for a launcher that somehow beat the UI up.
         controlServer.validateSession = { [weak store] sessionID in
             store?.sessions.contains { $0.id == sessionID } ?? false
         }
 
-        // The hook's per-event report lands on the pane it names, and only
-        // TerminalCenter knows which panes are live and whose they are — so
-        // it applies (or refuses) the event and the server relays the
-        // answer. Wired here for the same reason as validateSession: a
-        // report racing app construction is refused outright rather than
-        // half-applied, and the hook's next event carries the same facts.
+        // TerminalCenter validates hook reports against live panes. The server
+        // relays its answer; reports arriving before this wiring are refused.
         controlServer.applySessionEvent = { [weak center] event in
             Self.applySessionEvent(event, to: center)
-        }
-
-        // Every session-teardown path (close, project removal, workspace
-        // quiesce, process exit) funnels through TerminalCenter, and a
-        // session going away must cancel its open review so the launcher
-        // blocked on the control socket is answered rather than left hanging.
-        center.onSessionTeardown = { [weak overlays] sessionID in
-            overlays?.cancelReview(forSession: sessionID)
         }
 
         let uiState = UIState()
@@ -146,7 +110,6 @@ struct AgentsApp: App {
             store: store,
             uiState: uiState,
             panes: center,
-            reviewSessions: { [weak overlays] in overlays?.reviewSessionIDs ?? [] },
             suppressShortcut: { shortcutCapture.suppresses($0) }
         )
         self.actions = actions
@@ -197,7 +160,7 @@ struct AgentsApp: App {
         // or show a blank surface. Don't revert this to WindowGroup without
         // first making TerminalCenter's cache window-aware.
         Window("Agents", id: "main") {
-            RootView(store: store, center: center, overlays: overlays, uiState: uiState)
+            RootView(store: store, center: center, uiState: uiState)
                 .environment(\.appActions, actions)
                 .environmentObject(shortcuts)
                 .environmentObject(shortcutCapture)

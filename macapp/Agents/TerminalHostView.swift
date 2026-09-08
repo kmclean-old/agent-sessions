@@ -16,15 +16,9 @@ import SwiftUI
 /// would force reparenting the existing surface on first split; direct
 /// frames give the same geometry with neither cost, and the pure
 /// `paneFrames`/`dividers` math is unit-tested on the model.
-///
-/// Open review overlays (see `OverlayCenter`) are hosted in this same
-/// container and shown the same way — by hiding their siblings rather than
-/// by removing them. A review covers the session's entire pane area,
-/// whatever the split layout: reviews are per session, not per pane.
 struct TerminalHostView: NSViewRepresentable {
     @ObservedObject var store: AppStore
     @ObservedObject var center: TerminalCenter
-    @ObservedObject var overlays: OverlayCenter
 
     func makeNSView(context: Context) -> PaneHostContainerView {
         let containerView = PaneHostContainerView()
@@ -35,27 +29,8 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     func updateNSView(_ containerView: PaneHostContainerView, context: Context) {
-        // Every live overlay is mounted, not just the selected session's: a
-        // review can be requested by a session that isn't on screen, and its
-        // command process is spawned by libghostty only once the surface
-        // exists, which requires the view to be in the hierarchy with a real
-        // size. Mounting is not revealing: which subviews are visible is
-        // decided below, so a hidden session's review runs behind the scenes.
-        for overlayView in overlays.allViews {
-            containerView.mountOverlay(overlayView)
-        }
-
         guard let selectedID = store.selection else {
             containerView.presentNothing()
-            return
-        }
-
-        // The selected session's own review owns its pane. Scoped to the
-        // selection: another session's review must never take over work the
-        // user is looking at — it stays mounted, hidden, and running, and
-        // reselecting its session restores it exactly where it was.
-        if let overlayView = overlays.view(forSession: selectedID) {
-            containerView.present(overlay: overlayView)
             return
         }
 
@@ -145,7 +120,6 @@ final class PaneHostContainerView: NSView {
 
     private enum Presentation {
         case nothing
-        case overlay(NSView)
         case panes
     }
 
@@ -161,15 +135,6 @@ final class PaneHostContainerView: NSView {
     private var dividerItems: [DividerItem] = []
     private var dividerViews: [PaneDividerView] = []
     private var clickMonitor: Any?
-
-    /// The mounted overlay surfaces (weak — OverlayCenter removes them from
-    /// the hierarchy on dismissal and this must not keep them alive). Layout
-    /// gives these full bounds even while hidden: a review runs, and its TUI
-    /// draws, at real size in an unselected session, so reselecting restores
-    /// it exactly where it was with no reflow. Hidden *pane* views keep
-    /// their last frame instead — resizing a background session's shells on
-    /// every window change would churn SIGWINCH through TUIs nobody can see.
-    private let overlaySurfaces = NSHashTable<NSView>.weakObjects()
 
     /// Topmost chrome, present from init so every terminal mount can be
     /// positioned below it without ever re-adding (= reparenting) a live
@@ -203,14 +168,6 @@ final class PaneHostContainerView: NSView {
         addSubview(surfaceView, positioned: .below, relativeTo: focusRing)
     }
 
-    /// Mounts a review-overlay surface — see `overlaySurfaces` for how these
-    /// are laid out differently from panes.
-    func mountOverlay(_ surfaceView: NSView) {
-        overlaySurfaces.add(surfaceView)
-        mount(surfaceView)
-        needsLayout = true
-    }
-
     func presentNothing() {
         presentation = .nothing
         paneItems = []
@@ -219,17 +176,9 @@ final class PaneHostContainerView: NSView {
         applyPresentation()
     }
 
-    func present(overlay overlayView: NSView) {
-        presentation = .overlay(overlayView)
-        paneItems = []
-        dividerItems = []
-        setPresentationContext(nil)
-        applyPresentation()
-    }
-
     /// `context` is an opaque identity for WHOSE panes these are (the
-    /// selected session). Presentation changes — a different session, an
-    /// overlay, nothing — invalidate any in-flight divider drag: its
+    /// selected session). Presentation changes, including a different
+    /// session or no session, invalidate any in-flight divider drag: its
     /// latched item belongs to the previous presentation, and the
     /// generation alone can't tell two sessions apart (both counters can
     /// coincidentally hold the same value).
@@ -254,8 +203,6 @@ final class PaneHostContainerView: NSView {
         switch presentation {
         case .nothing:
             visibleSurfaces = []
-        case .overlay(let overlayView):
-            visibleSurfaces = [ObjectIdentifier(overlayView)]
         case .panes:
             visibleSurfaces = Set(paneItems.map { ObjectIdentifier($0.view) })
         }
@@ -289,16 +236,14 @@ final class PaneHostContainerView: NSView {
         return false
     }
 
-    /// Makes the presented surface (overlay, or the focused pane) first
-    /// responder so keystrokes land where the user is looking. AppKit
+    /// Makes the focused pane first responder so keystrokes land where the
+    /// user is looking. AppKit
     /// short-circuits when the view already is first responder, so calling
     /// this on every update is safe.
     private func focusCurrentSurface() {
         switch presentation {
         case .nothing:
             break
-        case .overlay(let overlayView):
-            window?.makeFirstResponder(overlayView)
         case .panes:
             guard let focused = paneItems.first(where: \.isFocused) else { break }
             window?.makeFirstResponder(focused.view)
@@ -379,16 +324,8 @@ final class PaneHostContainerView: NSView {
         super.layout()
         guard bounds.width > 0, bounds.height > 0 else { return }
 
-        // Every overlay surface — visible or not — fills the container, so a
-        // hidden review keeps running at real size (and so a freshly mounted
-        // one has the real size libghostty needs before it builds the
-        // surface and spawns the review).
-        for overlaySurface in overlaySurfaces.allObjects where overlaySurface.superview === self {
-            setSurfaceFrame(overlaySurface, to: bounds)
-        }
-
         switch presentation {
-        case .nothing, .overlay:
+        case .nothing:
             break
         case .panes:
             var focusedFrame: CGRect?

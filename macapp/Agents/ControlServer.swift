@@ -2,14 +2,8 @@ import AppKit
 import Darwin
 import Foundation
 
-/// A tiny local control channel: a Unix domain socket that lets a process
-/// running *inside* one of this app's terminals ask the app to do something
-/// that process cannot do for itself.
-///
-/// `review-open` acknowledges an app-owned review immediately; `review-submit`
-/// delivers annotations on the user's submit action. `overlay-run` retains
-/// the blocking protocol for older launchers. `session-event` is how
-/// `hooks/agents-status.sh` reports what the agent in one pane is doing:
+/// A tiny local control channel: a Unix domain socket used by
+/// `hooks/agents-status.sh` to report what the agent in one pane is doing:
 /// its attention state and its resumable session (see
 /// `ControlSessionEvent`). The hook used to write those facts as OSC 777
 /// escapes to the pane's pty and lost most of them: Ghostty throttles
@@ -20,20 +14,6 @@ import Foundation
 /// report. A socket line is never throttled, never deduplicated, needs no
 /// pty discovery, and gets an answer.
 ///
-/// Why a Unix socket rather than the two obvious alternatives:
-///
-/// - **AppleScript** is what stock Ghostty and iTerm2 expose, and what
-///   revdiff's bundled launcher reaches for. It would mean shipping an
-///   `.sdef`, and it drags in TCC: the first call raises an Automation
-///   consent prompt, and Claude Code's own sandbox blocks Apple Events
-///   outright unless the launcher is added to `excludedCommands`. A socket
-///   needs none of that.
-/// - **A URL scheme** (`open agents://…`) is less code here, but LaunchServices
-///   resolves a scheme to *one* bundle, so the Debug and Release builds —
-///   which deliberately differ only by bundle id — would fight over it, and a
-///   review fired from the dev build could surface in the release app. It is
-///   also fire-and-forget, with no way to report completion.
-///
 /// The socket path carries the bundle id, so each build gets its own endpoint,
 /// AND the pid of the process that bound it, so two launches of the same
 /// binary can never contend for one endpoint either — including a test-host
@@ -42,11 +22,8 @@ import Foundation
 /// run and exit, leaving the real app listening on an unlinked inode with no
 /// way back in. The path is stamped into every session's environment as
 /// `AGENTS_CONTROL_SOCK` (see `TerminalCenter.sessionEnvVars`), so a client
-/// always finds its own instance directly — no discovery, no guessing, no
-/// cross-build mixups, and no cross-instance contention.
-///
-/// Only the legacy `overlay-run` verb holds its connection until exit.
-/// Review launch and submission each use one short request and reply.
+/// always finds its own instance directly without discovery, cross-build
+/// mixups, or cross-instance contention.
 final class ControlServer: @unchecked Sendable {
     /// Absolute path of this process's socket.
     ///
@@ -92,20 +69,8 @@ final class ControlServer: @unchecked Sendable {
 
     private struct Request: Decodable {
         let cmd: String
-        /// Named by both verbs: the row the caller runs in (`AGENTS_SESSION_ID`).
+        /// The row the hook runs in (`AGENTS_SESSION_ID`).
         let session: String?
-        // overlay-run
-        let command: String?
-        let cwd: String?
-        /// Environment the review's process should see on top of the app's
-        /// own — the launcher forwards the variables its subprocesses
-        /// resolve tools and config through (PATH first of all: a
-        /// Finder-launched app has the bare system PATH, and revdiff spawns
-        /// jj/git/hg by name). Optional for a launcher that predates it.
-        let env: [String: String]?
-        let args: [String]?
-        let review: UUID?
-        // session-event
         let pane: String?
         let event: String?
         let status: String?
@@ -117,23 +82,19 @@ final class ControlServer: @unchecked Sendable {
         let agentHome: String?
 
         private enum CodingKeys: String, CodingKey {
-            case cmd, session, command, cwd, env, args, review, pane, event, status, agent, prompt
+            case cmd, session, pane, event, status, agent, prompt
             case agentSessionID = "agent_session_id"
             case agentHome = "agent_home"
         }
     }
 
     /// What one request line asks the app to do, after syntactic validation
-    /// but before any main-actor state (live sessions, live panes, open
-    /// reviews) is consulted. Extracted from `serve` so the wire-format
-    /// rules — the contract the revdiff launcher and the hook are written
-    /// against — can be pinned in tests without standing up a socket.
+    /// but before any main-actor state (live sessions and panes) is
+    /// consulted. Extracted from `serve` so the hook's wire-format rules can
+    /// be pinned in tests without standing up a socket.
     enum RequestDecision: Equatable {
         case refuse(String)
-        case run(command: String, cwd: String, session: String, env: [String: String])
         case sessionEvent(ControlSessionEvent)
-        case reviewOpen(ReviewRequest)
-        case reviewSubmit(session: String, review: UUID)
     }
 
     static func decide(line: String) -> RequestDecision {
@@ -141,44 +102,9 @@ final class ControlServer: @unchecked Sendable {
             return .refuse("malformed request")
         }
         switch request.cmd {
-        case "overlay-run": return decideOverlayRun(request)
         case "session-event": return decideSessionEvent(request)
-        case "review-open": return decideReviewOpen(request)
-        case "review-submit":
-            guard let session = request.session, !session.isEmpty else { return .refuse("missing session") }
-            guard let review = request.review else { return .refuse("missing review") }
-            return .reviewSubmit(session: session, review: review)
         default: return .refuse("unknown cmd: \(request.cmd)")
         }
-    }
-
-    private static func decideReviewOpen(_ request: Request) -> RequestDecision {
-        guard let session = request.session, !session.isEmpty else { return .refuse("missing AGENTS_SESSION_ID") }
-        guard let paneString = request.pane, let pane = UUID(uuidString: paneString) else {
-            return .refuse("missing or malformed AGENTS_PANE_ID")
-        }
-        guard let command = request.command, command.hasPrefix("/") else {
-            return .refuse("review command must be an absolute executable path")
-        }
-        return .reviewOpen(ReviewRequest(
-            session: session, pane: pane, command: command, arguments: request.args ?? [],
-            workingDirectory: request.cwd ?? NSHomeDirectory(), environment: request.env ?? [:]
-        ))
-    }
-
-    private static func decideOverlayRun(_ request: Request) -> RequestDecision {
-        guard let command = request.command, !command.isEmpty else {
-            return .refuse("missing command")
-        }
-        guard let session = request.session, !session.isEmpty else {
-            // An old launcher that predates session scoping omits this field.
-            // The message names the fix because the launcher prints it verbatim.
-            return .refuse("missing session — update the revdiff launcher to forward AGENTS_SESSION_ID")
-        }
-        return .run(
-            command: command, cwd: request.cwd ?? NSHomeDirectory(), session: session,
-            env: request.env ?? [:]
-        )
     }
 
     /// Every refusal here is a contract violation by the sender, not a
@@ -236,16 +162,14 @@ final class ControlServer: @unchecked Sendable {
         )
     }
 
-    private let overlays: OverlayCenter
     private let queue = DispatchQueue(label: "com.kirahowe.agents.control")
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     /// Answers whether a session id names a live session row. Wired by
     /// `AgentsApp` once the store exists; a request arriving before then (or
-    /// naming a session this app has never heard of) is refused. Refusal is
-    /// deliberate — there is no app-global fallback, so a review either
-    /// belongs to a live session or does not open at all.
+    /// naming a session this app has never heard of) is refused. There is no
+    /// app-global fallback because each event belongs to one session row.
     @MainActor var validateSession: ((String) -> Bool)?
 
     /// Applies one hook-delivered session event to the pane it names, or
@@ -256,36 +180,12 @@ final class ControlServer: @unchecked Sendable {
     /// refused: the hook's next event carries the same facts again.
     @MainActor var applySessionEvent: ((ControlSessionEvent) -> String?)?
 
-    /// The clients waiting on live overlays, keyed by invoking session id —
-    /// mirroring `OverlayCenter`'s one-review-per-session map. Only ever
-    /// touched on the main actor, alongside the overlay state it mirrors, so
-    /// "is a review running for this session" has exactly one answer rather
-    /// than two that can disagree.
-    @MainActor private var pendingClients: [String: Int32] = [:]
-
-    private let reviews: ReviewController?
-
-    init(overlays: OverlayCenter, socketPath: String = ControlServer.socketPath, reviews: ReviewController? = nil) {
-        self.overlays = overlays
+    init(socketPath: String = ControlServer.socketPath) {
         self.path = socketPath
-        self.reviews = reviews
     }
 
     @MainActor
     func start() {
-        overlays.onClosed = { [weak self] sessionID, outcome in
-            self?.reviews?.closed(session: sessionID, outcome: outcome)
-            switch outcome {
-            case .finished:
-                self?.completePending(forSession: sessionID, ok: true, error: nil)
-            case .cancelled:
-                self?.completePending(
-                    forSession: sessionID,
-                    ok: false,
-                    error: "the session that requested this review was closed"
-                )
-            }
-        }
         queue.async { [weak self] in self?.bindAndListen() }
 
         // A clean quit is the one shutdown path worth handling explicitly: it
@@ -299,7 +199,6 @@ final class ControlServer: @unchecked Sendable {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reviews?.shutdown() }
             self?.stop()
         }
     }
@@ -366,8 +265,8 @@ final class ControlServer: @unchecked Sendable {
             return
         }
 
-        // Owner-only: the socket grants the ability to run a command in this
-        // app, so it must not be reachable by other users on the machine.
+        // Owner-only: reports can alter a session's attention state and
+        // resume metadata, so other users on the machine must not reach it.
         chmod(path, S_IRUSR | S_IWUSR)
 
         guard listen(fd, 8) == 0 else {
@@ -443,18 +342,16 @@ final class ControlServer: @unchecked Sendable {
     private func acceptOne() {
         let client = accept(listenFD, nil, nil)
         guard client >= 0 else { return }
-        // A launcher can vanish mid-review — its `nc` gets Ctrl-C'd, its
-        // shell exits out from under it — and the next write(2) to that dead
-        // peer would otherwise raise SIGPIPE with the default disposition,
+        // A hook can vanish while its request is being handled. The next
+        // write(2) to that dead peer would otherwise raise SIGPIPE,
         // which terminates the whole app rather than just failing this one
         // write. SO_NOSIGPIPE turns that into an ordinary EPIPE return, which
         // `reply(to:...)`'s `n <= 0` check below already treats as "stop
         // writing, the peer is gone."
         var noSigPipe: Int32 = 1
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        // Each connection is served off the accept queue: a request blocks
-        // for as long as its review is open, which would otherwise stall
-        // every later connection behind it.
+        // Each connection is served off the accept queue so reading one slow
+        // client cannot stall later hook reports.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.serve(client: client)
         }
@@ -469,21 +366,9 @@ final class ControlServer: @unchecked Sendable {
         }
         switch Self.decide(line: line) {
         case .refuse(let error):
-            reply(to: client, ok: false, error: error, closing: true)
-        case .run(let command, let cwd, let session, let env):
-            serveOverlayRun(client: client, command: command, cwd: cwd, session: session, env: env)
+            reply(to: client, ok: false, error: error)
         case .sessionEvent(let event):
             serveSessionEvent(client: client, event: event)
-        case .reviewOpen(let request):
-            serveAction(client: client, session: request.session) { server in
-                guard let reviews = server.reviews else { return "review delivery is not wired" }
-                return reviews.open(request)
-            }
-        case .reviewSubmit(let session, let review):
-            serveAction(client: client, session: session) { server in
-                guard let reviews = server.reviews else { return "review delivery is not wired" }
-                return reviews.submit(session: session, review: review)
-            }
         }
     }
 
@@ -491,74 +376,25 @@ final class ControlServer: @unchecked Sendable {
     /// holds the agent's next step until then, so this must never wait on
     /// anything but the main actor.
     private func serveSessionEvent(client: Int32, event: ControlSessionEvent) {
-        serveAction(client: client, session: event.session) { server in
-            guard let apply = server.applySessionEvent else { return "session events are not wired" }
-            return apply(event)
-        }
-    }
-
-    private func serveAction(
-        client: Int32, session: String,
-        action: @escaping @MainActor (ControlServer) -> String?
-    ) {
         Task { @MainActor [weak self] in
             guard let self else {
                 close(client)
                 return
             }
-            guard self.validateSession?(session) == true else {
-                self.reply(to: client, ok: false, error: "unknown session: \(session)", closing: true)
+            guard self.validateSession?(event.session) == true else {
+                self.reply(to: client, ok: false, error: "unknown session: \(event.session)")
                 return
             }
-            let error = action(self)
-            self.reply(to: client, ok: error == nil, error: error, closing: true)
+            guard let apply = self.applySessionEvent else {
+                self.reply(to: client, ok: false, error: "session events are not wired")
+                return
+            }
+            let error = apply(event)
+            self.reply(to: client, ok: error == nil, error: error)
         }
     }
 
-    private func serveOverlayRun(
-        client: Int32, command: String, cwd: String, session: String, env: [String: String]
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else {
-                close(client)
-                return
-            }
-            guard self.validateSession?(session) == true else {
-                self.reply(to: client, ok: false, error: "unknown session: \(session)", closing: true)
-                return
-            }
-            guard self.pendingClients[session] == nil else {
-                self.reply(
-                    to: client,
-                    ok: false,
-                    error: "a review is already open in this session",
-                    closing: true
-                )
-                return
-            }
-            do {
-                try self.overlays.present(
-                    command: command, workingDirectory: cwd, sessionID: session, environment: env
-                )
-                // No reply yet — the overlay is live, and this connection is
-                // the thing the caller is blocked on. `completePending` answers
-                // it when the command exits.
-                self.pendingClients[session] = client
-            } catch {
-                // `OverlayCenter.PresentError` describes itself in the words
-                // the launcher should print.
-                self.reply(to: client, ok: false, error: String(describing: error), closing: true)
-            }
-        }
-    }
-
-    @MainActor
-    private func completePending(forSession sessionID: String, ok: Bool, error: String?) {
-        guard let client = pendingClients.removeValue(forKey: sessionID) else { return }
-        reply(to: client, ok: ok, error: error, closing: true)
-    }
-
-    private func reply(to client: Int32, ok: Bool, error: String?, closing: Bool) {
+    private func reply(to client: Int32, ok: Bool, error: String?) {
         var payload: [String: Any] = ["ok": ok]
         if let error { payload["error"] = error }
         let data = (try? JSONSerialization.data(withJSONObject: payload))
@@ -573,7 +409,7 @@ final class ControlServer: @unchecked Sendable {
                 sent += n
             }
         }
-        if closing { close(client) }
+        close(client)
     }
 
     /// Reads one newline-terminated request. Capped because this socket takes

@@ -1,49 +1,11 @@
+import Darwin
+import Foundation
 import XCTest
 @testable import Agents
 
-/// `ControlServer.decide` is the wire contract the revdiff launcher is
-/// written against: one JSON line in, either a refusal string (which the
-/// launcher prints verbatim to the agent) or the review to run. Each refusal
-/// pinned here fails silently in production if it regresses — the launcher
-/// just reports whatever the app said, so a wrong decision here becomes a
-/// review opening for the wrong session or a misleading error at the agent.
+/// `ControlServer.decide` is the hook's wire contract: one JSON line in,
+/// either a refusal string or the session event to apply.
 final class ControlServerTests: XCTestCase {
-    func testWellFormedRequestRuns() {
-        let decision = ControlServer.decide(
-            line: #"{"cmd":"overlay-run","command":"/tmp/launch.sh","cwd":"/tmp/repo","session":"row-1"}"#
-        )
-        XCTAssertEqual(
-            decision,
-            .run(command: "/tmp/launch.sh", cwd: "/tmp/repo", session: "row-1", env: [:])
-        )
-    }
-
-    /// The review runs as the overlay surface's own process, in the app's
-    /// environment — which for a Finder-launched app is the bare system PATH.
-    /// The launcher forwards what its subprocesses need from the shell that
-    /// asked; the decision carries it through untouched, and a launcher that
-    /// predates the field still runs.
-    func testOverlayRunForwardsTheCallersEnvironment() {
-        let decision = ControlServer.decide(
-            line: #"{"cmd":"overlay-run","command":"/tmp/launch.sh","cwd":"/tmp/repo","session":"row-1","env":{"PATH":"/opt/homebrew/bin:/usr/bin","LANG":"en_GB.UTF-8"}}"#
-        )
-        XCTAssertEqual(
-            decision,
-            .run(
-                command: "/tmp/launch.sh", cwd: "/tmp/repo", session: "row-1",
-                env: ["PATH": "/opt/homebrew/bin:/usr/bin", "LANG": "en_GB.UTF-8"]
-            ),
-            "the forwarded environment must reach the overlay as sent — it is how revdiff's jj/git/hg subprocesses find their binaries and config from inside an app that has no PATH of its own"
-        )
-        XCTAssertEqual(
-            ControlServer.decide(
-                line: #"{"cmd":"overlay-run","command":"/tmp/launch.sh","cwd":"/tmp/repo","session":"row-1","env":{"PATH":1}}"#
-            ),
-            .refuse("malformed request"),
-            "an env that is not a string map is a malformed request, not a review that starts with half an environment"
-        )
-    }
-
     func testMalformedJSONIsRefused() {
         XCTAssertEqual(
             ControlServer.decide(line: "not json"),
@@ -58,72 +20,13 @@ final class ControlServerTests: XCTestCase {
         )
     }
 
-    func testMissingCommandIsRefused() {
-        XCTAssertEqual(
-            ControlServer.decide(line: #"{"cmd":"overlay-run","session":"row-1"}"#),
-            .refuse("missing command")
-        )
-    }
-
-    /// A launcher that predates session scoping omits `session`. The refusal
-    /// message is user-facing guidance (the launcher prints it verbatim), so
-    /// it must name the actual fix rather than a generic "bad request" —
-    /// this is the only breadcrumb anyone gets after updating the app but
-    /// not the launcher.
-    func testMissingSessionIsRefusedWithUpgradeGuidance() {
-        for line in [
-            #"{"cmd":"overlay-run","command":"/tmp/launch.sh"}"#,
-            #"{"cmd":"overlay-run","command":"/tmp/launch.sh","session":""}"#,
-        ] {
-            let decision = ControlServer.decide(line: line)
-            guard case .refuse(let message) = decision else {
-                XCTFail("a request without a session must be refused, got \(decision) for \(line)")
-                continue
-            }
-            XCTAssertTrue(
-                message.contains("AGENTS_SESSION_ID"),
-                "the missing-session refusal must tell the reader what to forward — it is printed verbatim by the launcher and is the only clue after an app/launcher version skew"
+    func testRemovedReviewCommandsAreUnknown() {
+        for command in ["overlay-run", "review-open", "review-submit"] {
+            XCTAssertEqual(
+                ControlServer.decide(line: #"{"cmd":"\#(command)"}"#),
+                .refuse("unknown cmd: \(command)")
             )
         }
-    }
-
-    /// The launcher may omit cwd (it never does today, but the field is
-    /// optional in the wire format) — the app falls back to home rather than
-    /// refusing, matching the pre-scoping behavior.
-    func testMissingCwdFallsBackToHome() {
-        let decision = ControlServer.decide(
-            line: #"{"cmd":"overlay-run","command":"/tmp/launch.sh","session":"row-1"}"#
-        )
-        XCTAssertEqual(
-            decision,
-            .run(command: "/tmp/launch.sh", cwd: NSHomeDirectory(), session: "row-1", env: [:])
-        )
-    }
-
-    /// A build without its overlay wrapper cannot run a review, and the
-    /// refusal has to reach the launcher as a JSON line that names the
-    /// resource — that line is the only thing the agent ever sees.
-    @MainActor
-    func testAMissingOverlayWrapperIsRefusedOverTheSocket() async throws {
-        let socketPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("agents-wrapper-test-\(getpid()).sock").path
-        let server = ControlServer(overlays: OverlayCenter(wrapperURL: nil), socketPath: socketPath)
-        server.validateSession = { $0 == "row-1" }
-        server.start()
-        defer { server.stop() }
-        for _ in 0..<100 where !FileManager.default.fileExists(atPath: socketPath) {
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath), "the server never bound its socket")
-
-        let refusal = try await Self.run(
-            "/usr/bin/nc", ["-U", "-w", "2", socketPath], environment: ["PATH": "/usr/bin:/bin"],
-            stdin: #"{"cmd":"overlay-run","command":"/tmp/launch.sh","cwd":"/tmp","session":"row-1"}"# + "\n"
-        )
-        XCTAssertTrue(
-            refusal.output.contains(#""ok":false"#) && refusal.output.contains("overlay-run.sh"),
-            "the refusal must be a JSON line naming the missing resource, got: \(refusal.output)"
-        )
     }
 
     // MARK: - session-event
@@ -304,6 +207,63 @@ final class ControlServerTests: XCTestCase {
         )
     }
 
+    func testControlSocketPathIsScopedToTheBundleAndProcess() {
+        let path = ControlServer.socketPath
+        let bundleID = Bundle(for: ControlServerTests.self).bundleIdentifier
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        XCTAssertTrue(
+            path.hasSuffix(".control.\(pid).sock"),
+            "the socket path must carry the process id so simultaneous app and test-host launches cannot contend for one endpoint: \(path)"
+        )
+        XCTAssertTrue(
+            path.contains("com.kirahowe.agents"),
+            "the socket path must carry the bundle id so Debug and Release builds cannot collide (got \(path), test bundle \(bundleID ?? "nil"))"
+        )
+        XCTAssertLessThan(
+            path.utf8.count,
+            104,
+            "sockaddr_un.sun_path is 104 bytes on Darwin; a longer path cannot be bound"
+        )
+    }
+
+    func testSweepDeadSocketsRemovesOnlyDeadMatchingSockets() throws {
+        // Keep the fixture path short enough for sockaddr_un.sun_path.
+        let directory = "/tmp/ctrlsweep-\(ProcessInfo.processInfo.processIdentifier)-\(Int(Date().timeIntervalSince1970 * 1000))"
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+
+        let prefix = "com.kirahowe.agents.control."
+        let deadPath = "\(directory)/\(prefix)111.sock"
+        let livePath = "\(directory)/\(prefix)222.sock"
+        let unrelatedPath = "\(directory)/not-a-control-socket.txt"
+        FileManager.default.createFile(atPath: unrelatedPath, contents: Data("hello".utf8))
+
+        let deadFD = try bindUnixSocket(at: deadPath)
+        close(deadFD)
+
+        let liveFD = try bindUnixSocket(at: livePath)
+        XCTAssertEqual(listen(liveFD, 1), 0, "failed to listen on the live test socket")
+        defer { close(liveFD) }
+
+        ControlServer.sweepDeadSockets(
+            in: directory, prefix: prefix, ownPath: "/nonexistent-own-path"
+        )
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: deadPath),
+            "the sweep must remove a socket file with no listener"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: livePath),
+            "the sweep must preserve a socket with a live listener"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: unrelatedPath),
+            "the sweep must preserve files outside the control-socket naming scheme"
+        )
+    }
+
     // MARK: - End to end: the real hook, a real socket
 
     /// The whole reporting path exactly as the hook drives it: the bundled
@@ -340,7 +300,7 @@ final class ControlServerTests: XCTestCase {
 
         let socketPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("agents-hook-test-\(getpid()).sock").path
-        let server = ControlServer(overlays: OverlayCenter(), socketPath: socketPath)
+        let server = ControlServer(socketPath: socketPath)
         server.validateSession = { $0 == "row-1" }
         server.applySessionEvent = { [center] event in center.handleControlSessionEvent(event) }
         server.start()
@@ -421,5 +381,41 @@ final class ControlServerTests: XCTestCase {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    /// Binds without listening, allowing the sweep test to construct both
+    /// live and abandoned Unix socket files.
+    private func bindUnixSocket(at path: String) throws -> Int32 {
+        struct SocketSetupError: Error, CustomStringConvertible {
+            let description: String
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw SocketSetupError(description: "socket() failed: \(String(cString: strerror(errno)))")
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
+            throw SocketSetupError(description: "test socket path too long: \(path)")
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            raw.copyBytes(from: pathBytes)
+        }
+        let size = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let bound = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                Darwin.bind(fd, address, size)
+            }
+        }
+        guard bound == 0 else {
+            let message = String(cString: strerror(errno))
+            close(fd)
+            throw SocketSetupError(description: "bind() failed: \(message)")
+        }
+        return fd
     }
 }

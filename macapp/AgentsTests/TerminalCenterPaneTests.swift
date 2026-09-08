@@ -66,7 +66,7 @@ final class TerminalCenterPaneTests: XCTestCase {
         let newView = center.view(forPane: newPane!)!
         XCTAssertEqual(
             newView.configuration.envVars["AGENTS_SESSION_ID"], sessionID,
-            "every pane must share the session's AGENTS_SESSION_ID — a pane with its own id (or none) could never scope a review back to its sidebar row"
+            "every pane must share the session's AGENTS_SESSION_ID so hook events reach its sidebar row"
         )
         XCTAssertEqual(newView.configuration.envVars["AGENTS_APP"], "1")
         XCTAssertEqual(
@@ -106,19 +106,13 @@ final class TerminalCenterPaneTests: XCTestCase {
         let newPane = center.splitPane(in: sessionID, axis: .horizontal, workingDirectory: "/tmp")!
 
         var exitedSessions: [String] = []
-        var teardowns: [String] = []
         center.onProcessExit = { exitedSessions.append($0) }
-        center.onSessionTeardown = { teardowns.append($0) }
 
         proxy(forPane: newPane, in: center).terminalDidClose(processAlive: false)
 
         XCTAssertTrue(
             exitedSessions.isEmpty,
             "a pane exit that leaves other panes alive must NOT report session process-exit — that callback removes the sidebar row, and the session is still running in its remaining pane"
-        )
-        XCTAssertTrue(
-            teardowns.isEmpty,
-            "a pane exit is not a session teardown — firing the teardown hook here would cancel the session's open review out from under it"
         )
         let layout = center.layouts[sessionID]!
         XCTAssertEqual(layout.paneCount, 1, "the exited pane's tree node must collapse")
@@ -139,9 +133,7 @@ final class TerminalCenterPaneTests: XCTestCase {
         let initialPane = center.layouts[sessionID]!.initialPane
 
         var exitedSessions: [String] = []
-        var teardowns: [String] = []
         center.onProcessExit = { exitedSessions.append($0) }
-        center.onSessionTeardown = { teardowns.append($0) }
 
         proxy(forPane: initialPane, in: center).terminalDidClose(processAlive: false)
 
@@ -149,7 +141,6 @@ final class TerminalCenterPaneTests: XCTestCase {
             exitedSessions, [sessionID],
             "the last pane's exit must reach onProcessExit under the SESSION id — this is the path that removes the sidebar row, and a pane id here would remove nothing"
         )
-        XCTAssertEqual(teardowns, [sessionID])
         XCTAssertNil(center.layouts[sessionID], "the session's layout must be gone after its last pane exits")
     }
 
@@ -264,6 +255,32 @@ final class TerminalCenterPaneTests: XCTestCase {
         center.onSessionSignal = { _, _, signal in signals.append(signal) }
         proxy(forPane: pane, in: center).terminalDidChangeTitle("⠙ secrets")
         XCTAssertTrue(signals.isEmpty)
+    }
+
+    func testCommandFinishAndSessionEndStopInterpretingCodexTitles() {
+        let center = TerminalCenter()
+        _ = makeSession(in: center)
+        let pane = center.layouts[sessionID]!.initialPane
+        let delegate = proxy(forPane: pane, in: center)
+        var signals: [AttentionSignal] = []
+        center.onSessionSignal = { _, _, signal in signals.append(signal) }
+
+        for endedByHook in [false, true] {
+            center.handleAgentSessionEvent(sessionID: sessionID, paneID: pane,
+                event: AgentSessionEvent(agent: "codex", name: "SessionStart", sessionID: "codex-1", query: nil))
+            delegate.terminalDidChangeTitle("⠙ working")
+            XCTAssertEqual(signals.last, .structured(.clear))
+            signals.removeAll()
+
+            if endedByHook {
+                center.handleAgentSessionEvent(sessionID: sessionID, paneID: pane,
+                    event: AgentSessionEvent(agent: "codex", name: "SessionEnd", sessionID: "codex-1", query: nil))
+            } else {
+                delegate.terminalDidFinishCommand(exitCode: 0, durationNanos: 1)
+            }
+            delegate.terminalDidChangeTitle("[ ! ] Action Required | another program")
+            XCTAssertTrue(signals.isEmpty)
+        }
     }
 
     func testSignalsFromEveryPaneAggregateToTheOneSessionRow() {
