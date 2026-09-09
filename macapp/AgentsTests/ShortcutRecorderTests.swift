@@ -243,4 +243,69 @@ final class ShortcutRecorderTests: XCTestCase {
         XCTAssertEqual(recorded, 1)
         XCTAssertFalse(uiState.showShortcutHelp)
     }
+
+    private final class SheetState: ObservableObject {
+        @Published var show = false
+    }
+
+    private struct SheetHost: View {
+        @ObservedObject var state: SheetState
+        let preferences: ShortcutPreferences
+        let capture: ShortcutCapture
+
+        var body: some View {
+            Color.clear.sheet(isPresented: $state.show) {
+                ShortcutHelpView(preferences: preferences, capture: capture)
+            }
+        }
+    }
+
+    func test_swiftUISheetRecordsPostedCommandEvent() async throws {
+        let state = SheetState()
+        let preferences = ShortcutPreferences(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let capture = ShortcutCapture()
+        let hosting = NSHostingView(rootView: SheetHost(state: state, preferences: preferences, capture: capture))
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 700), styleMask: .titled, backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        parent.contentView = hosting
+        parent.makeKeyAndOrderFront(nil)
+        defer { parent.close() }
+        hosting.layoutSubtreeIfNeeded()
+        state.show = true
+        try await Task.sleep(for: .milliseconds(300))
+        let sheet = try XCTUnwrap(parent.attachedSheet)
+
+        func recorders(in view: NSView) -> [ShortcutRecorderButton] {
+            (view as? ShortcutRecorderButton).map { [$0] } ?? view.subviews.flatMap { recorders(in: $0) }
+        }
+        let button = try XCTUnwrap(recorders(in: sheet.contentView!).first { $0.shortcutAction == .focusPaneLeft })
+        button.performClick(nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(capture.action, .focusPaneLeft)
+        XCTAssertTrue(sheet.firstResponder === button)
+
+        let router = ShortcutRouter(perform: { _ in false }, capture: { capture.handle($0) })
+        router.install()
+
+        let flagsChanged = try XCTUnwrap(NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: .command, timestamp: 10, windowNumber: sheet.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55))
+        NSApp.postEvent(flagsChanged, atStart: true)
+        let queuedFlags = try XCTUnwrap(NSApp.nextEvent(matching: .flagsChanged, until: Date().addingTimeInterval(0.5), inMode: .default, dequeue: true))
+        NSApp.sendEvent(queuedFlags)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(capture.action, .focusPaneLeft)
+        XCTAssertTrue(sheet.firstResponder === button)
+
+        let source = CGEventSource(stateID: .privateState)
+        let cgKey = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 38, keyDown: true))
+        cgKey.flags = [.maskCommand, .maskShift]
+        let key = try XCTUnwrap(NSEvent(cgEvent: cgKey))
+        XCTAssertNil(key.window)
+        NSApp.postEvent(key, atStart: true)
+        let queued = try XCTUnwrap(NSApp.nextEvent(matching: .keyDown, until: Date().addingTimeInterval(0.5), inMode: .default, dequeue: true))
+        withExtendedLifetime(router) { NSApp.sendEvent(queued) }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(capture.action)
+        XCTAssertEqual(button.title, Shortcut(key: .char("j"), modifiers: [.command, .shift]).displayString)
+        state.show = false
+    }
 }
