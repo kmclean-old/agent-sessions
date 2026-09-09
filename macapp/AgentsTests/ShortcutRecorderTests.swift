@@ -167,6 +167,45 @@ final class ShortcutRecorderTests: XCTestCase {
         XCTAssertEqual(sink.received, 0, "A nil handler result must remain nil at the installed monitor boundary")
     }
 
+    func test_recordingCapturesApplicationEventsWithoutAppRouter() {
+        let (window, button, capture, editor) = fixture()
+        defer { window.close() }
+        var recorded = 0
+        button.onRecord = {
+            recorded += 1
+            editor.record($0, for: .renameSession, capture: capture)
+        }
+        button.startRecording()
+        button.startRecording()
+        let key = event(in: window, characters: "J", modifiers: [.command, .shift], keyCode: 38)
+
+        NSApp.sendEvent(key)
+
+        XCTAssertNil(capture.action)
+        XCTAssertEqual(editor.bindings[.renameSession], Shortcut(key: .char("j"), modifiers: [.command, .shift]))
+        XCTAssertEqual(recorded, 1, "Restarting capture must not leave duplicate listeners")
+    }
+
+    func test_recorderListenerReleasesInputWhenFocusMoves() {
+        let (window, _, capture, editor) = fixture()
+        defer { window.close() }
+        let sink = KeySink()
+        window.contentView!.addSubview(sink)
+        XCTAssertTrue(window.makeFirstResponder(sink))
+        XCTAssertNil(capture.action)
+        var passedThrough = 0
+        let observer = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { _ in
+            passedThrough += 1
+            return nil
+        }!
+        defer { NSEvent.removeMonitor(observer) }
+
+        NSApp.sendEvent(event(in: window, modifiers: []))
+
+        XCTAssertEqual(passedThrough, 1)
+        XCTAssertEqual(editor.bindings, Keymap.standard)
+    }
+
     func test_hostedEditorRecordsCommandShortcutAfterInvalidAttempt() async throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let preferences = ShortcutPreferences(defaults: defaults)

@@ -11,12 +11,18 @@ final class ShortcutCapture: ObservableObject {
     private var receive: ((NSEvent) -> Void)?
     private var lastCaptured: NSEvent?
     private var heldKeys: [UInt16: Int] = [:]
+    private var monitor: Any?
 
     func begin(action: AppAction, owner: NSView, receive: @escaping (NSEvent) -> Void) {
         end()
         guard let window = owner.window, window.makeFirstResponder(owner) else { return }
         self.owner = owner
         self.receive = receive
+        // A focused recorder owns key capture before host views and menus.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event) ? nil : event
+        }
         self.action = action
     }
 
@@ -24,6 +30,14 @@ final class ShortcutCapture: ObservableObject {
         action = nil
         owner = nil
         receive = nil
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     func end(for view: NSView) {
