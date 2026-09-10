@@ -2,9 +2,26 @@
 
 Agents accepts lifecycle reports from native harness hooks over its control
 socket. A report describes an observed event. The app's adapter for that
-harness decides whether the event means working, blocked, resolved, settled,
-or exited. Emitters do not claim that a task succeeded, and they do not infer
-causal order from wall-clock time.
+harness decides how the event changes phase and attention. Emitters do not
+claim that a task succeeded, and they do not infer causal order from wall-clock
+time.
+
+## Lifecycle path
+
+Hook reports, terminal-title events, and OS process exits enter
+`TerminalCenter`, which rejects stale pane generations and superseded runs.
+The registered `HarnessAdapter` turns a native event into a transition, and
+the `HarnessLifecycle` reducer applies it. `AppStore` keeps that per-pane state,
+builds the session summary, and publishes a read-only `AgentDashboardSnapshot`.
+
+Runtime state is ephemeral. Its phase can be working, blocked, idle, or unknown;
+a restored pane remains unknown until fresh evidence arrives. Unseen completion
+is tracked separately. "Done" means that the harness emitted a terminal turn
+event that the user has not seen, not that the user's task succeeded.
+
+An integration with useful native events should add a `HarnessAdapter` to the
+registry. A harness that emits the canonical events below needs no Swift
+adapter.
 
 ## Socket protocol
 
@@ -57,10 +74,10 @@ contract outside panes that have `AGENTS_PANE_GENERATION`; this preserves
 compatibility with older Agents builds.
 
 Claude Code can register the script for `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`, and
-`SessionEnd`. Codex installations that expose the same JSON hook contract can
-point those lifecycle hooks at the same command. The script drains stdin even
-when the current terminal is not Agents.
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`,
+`Notification`, `Stop`, and `SessionEnd`. Codex installations that expose the
+same JSON hook contract can point those lifecycle hooks at the same command.
+The script drains stdin even when the current terminal is not Agents.
 
 The process walk suppresses nested harnesses. A Claude hook payload with an
 `agent_id` is also suppressed because it belongs to a native subagent, not the
@@ -75,6 +92,11 @@ Interrupt reporting also varies by Claude Code version and hook configuration;
 only when the native payload supplies it. A `Stop` hook may cause a
 continuation, so an integration that receives a native continuation flag must
 forward it as `will_continue`.
+
+`SessionEnd` also needs its native reason. Claude documents `clear` and
+`resume` reasons that end a conversation while the same process continues, so
+the app resets conversation state for those reasons instead of retiring the
+run. See [Claude Code hooks](https://code.claude.com/docs/en/hooks#sessionend).
 
 ## OMP extension
 

@@ -144,4 +144,77 @@ final class HarnessLifecycleTests: XCTestCase {
         XCTAssertTrue(ended.retiredRunIDs.contains("run"))
         XCTAssertEqual(HarnessLifecycle.endRun(ended, at: Date(timeIntervalSince1970: 30)), ended)
     }
+
+    func testClearSessionEndKeepsRunForNextConversation() {
+        var state = HarnessLifecycle.reduce(
+            PaneLifecycle(),
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "old", event: "PreToolUse"
+            ),
+            adapter: adapter,
+            at: first
+        )
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "old",
+                event: "SessionEnd", source: "clear"
+            ),
+            adapter: adapter,
+            at: later
+        )
+        XCTAssertTrue(state.hasAgent)
+        XCTAssertNil(state.conversationID)
+        XCTAssertFalse(state.retiredRunIDs.contains("run"))
+
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "new", event: "SessionStart"
+            ),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 30)
+        )
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "new", event: "PreToolUse"
+            ),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 40)
+        )
+        XCTAssertEqual(state.phase, .working)
+        XCTAssertEqual(state.conversationID, "new")
+    }
+
+    func testExitSessionEndRetiresRunAndConversationMismatchIsRejected() {
+        var state = HarnessLifecycle.reduce(
+            PaneLifecycle(),
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "current", event: "SessionStart"
+            ),
+            adapter: adapter,
+            at: first
+        )
+        let mismatched = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "stale", event: "PreToolUse"
+            ),
+            adapter: adapter,
+            at: later
+        )
+        XCTAssertEqual(mismatched, state)
+
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "run", conversationID: "current", event: "SessionEnd", source: "exit"
+            ),
+            adapter: adapter,
+            at: later
+        )
+        XCTAssertFalse(state.hasAgent)
+        XCTAssertTrue(state.retiredRunIDs.contains("run"))
+    }
 }

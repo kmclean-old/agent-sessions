@@ -1,92 +1,24 @@
 #!/usr/bin/env bash
-# Tells the Agents app what the agent hosting this hook is doing, over the
-# app's control socket: one line of JSON per hook event, carrying the two
-# facts the sidebar and the restore banner are built from.
+# Sends Claude Code and Codex lifecycle hooks to the Agents control socket.
+# New panes provide AGENTS_PANE_GENERATION and receive version 1
+# `harness-event` reports. A run is the nearest harness ancestor's exact PID
+# plus its OS start stamp. Native conversation, turn, request, outcome, and
+# interrupt fields are forwarded when the hook supplies them.
 #
-#   status  — is the agent waiting on the user? Drives the coloured dot on
-#             the session's row (SessionAttention in the app):
-#               Stop / Notification(idle_prompt)   -> your-turn  (gold: finished, your move)
-#               Notification(permission_prompt)    -> blocked    (red: stuck waiting on you)
-#               PermissionRequest                  -> blocked    (Codex's spelling of the same)
-#               SessionStart / UserPromptSubmit /
-#               PreToolUse / PostToolUse           -> clear      (no dot: working)
-#             PreToolUse fires before the permission prompt and PostToolUse
-#             after the tool runs, so a tool-use event is what clears the
-#             red once the user unblocks the agent — approving a permission
-#             prompt is not a UserPromptSubmit, so nothing else would.
+# Older panes have no generation. They keep the `session-event` behavior used
+# by older Agents builds: hook names map to clear, blocked, or your-turn
+# attention and carry resume metadata when available.
 #
-#   session — which harness this is ("claude" or "codex"), under which of
-#             its own session ids, plus a preview of the prompt when the
-#             event carries one (UserPromptSubmit), plus the harness's
-#             configuration home when its environment set one (CLAUDE_CONFIG_DIR,
-#             CODEX_HOME). After the app restarts, this is what lets a
-#             restored row greet the user with
-#                 Last Claude Code session: <title>
-#                 ❯ claude --resume <id>
-#             — the command typed and waiting for Enter — instead of a bare
-#             shell. The home matters because the harness keeps its sessions
-#             under it: without CODEX_HOME=… in front, `codex resume <id>`
-#             in a fresh shell would look in ~/.codex and find nothing.
+# The process walk suppresses a harness nested inside another harness. Claude
+# payloads with agent_id are native subagents and are also suppressed. If a new
+# pane's hook cannot identify the actual harness process, it sends the legacy
+# attention report without a guessed PID.
 #
-# Wired to Claude Code and Codex lifecycle hooks, which share an event
-# vocabulary and a JSON-on-stdin payload, so one script serves both. The
-# harness is identified by walking up the process tree to the nearest
-# ancestor named "claude*" or "codex*", with $CLAUDECODE as a fallback; when
-# neither identifies one, the line carries status only.
-#
-# A harness running INSIDE another harness's pane — `codex exec` launched
-# by Claude Code's Bash tool for a review, `claude -p` spawned by a script
-# an agent is running — says nothing at all. Nearest-ancestor wins for
-# identity, but the pane belongs to the outer agent: the inner one's
-# events would relabel the row's resume record with a one-shot session
-# nobody wants back, and its status would flicker over the outer agent's.
-# So the walk keeps going after the first match, and a second harness
-# further up means exit without reporting.
-#
-# Wire format — see ControlServer.decide in the app for the contract:
-#   {"cmd":"session-event","session":$AGENTS_SESSION_ID,"pane":$AGENTS_PANE_ID,
-#    "event":<hook_event_name>,"status":"clear"|"your-turn"|"blocked",
-#    "agent":"claude"|"codex","agent_session_id":<session_id>,
-#    "agent_home":<CLAUDE_CONFIG_DIR|CODEX_HOME>,"prompt":<preview>}
-# status, agent/agent_session_id, agent_home and prompt are each omitted
-# when unknown. The app answers {"ok":true} or {"ok":false,"error":...} and
-# closes. Waiting for the reply is what makes the write synchronous: the
-# event is in the app before the agent's next step.
-#
-# Why a socket and not the terminal. Earlier versions wrote OSC 777
-# desktop-notification escapes to the session's pty and let the app's
-# terminal deliver them. Ghostty throttles those app-wide — one notification
-# per second across every surface, identical content suppressed for five
-# seconds — so the session announcement that followed a status escape by a
-# few microseconds was dropped every single time, and two agents reporting
-# within a second of each other lost one of the reports. Nothing here could
-# tell: the write to the pty had succeeded. A socket line is never
-# throttled, never deduplicated, needs no pty discovery (hooks run without a
-# controlling terminal), carries the prompt preview without the ~2 KB OSC
-# size limit, and gets an answer. The app still accepts the old OSC forms
-# from other emitters; this script no longer produces them.
-#
-# Every event is sent, unconditionally. The app deduplicates on its side —
-# a repeated status is a no-op in its reducer, an unchanged announcement
-# skips the save — so there is no state to keep here, and no way for a lost
-# event to be remembered as delivered.
-#
-# Gated on the environment the app stamps into every pane it spawns (see
-# TerminalCenter.sessionEnvVars): this hook is registered globally in the
-# user's Claude Code settings, so it also runs for sessions hosted in iTerm2
-# and every other terminal, where those variables are absent and there is
-# no app to talk to.
-#
-# Diagnostics go to ~/Library/Logs/Agents/hook.log, and only when something
-# is wrong: a pane with no AGENTS_PANE_ID (the app that spawned it predates
-# this script's protocol — update the app), a refusal from the app, or no
-# answer at all. Consecutive identical lines are collapsed, since a stale
-# app would otherwise produce one per tool call. Set AGENTS_HOOK_DEBUG=1 to
-# log every decision, including the nested-harness ones.
-#
-# Bash + jq rather than babashka (which the rest of this repo uses): hooks
-# run on every tool call, so process startup cost is paid constantly. `nc`
-# is macOS's own BSD netcat, which speaks AF_UNIX with -U.
+# The socket exchange is synchronous and bounded to two idle seconds. This
+# script has no polling or persistent state. The app maps native event names to
+# lifecycle phases and observes the reported PID for process exit. Diagnostics
+# go to ~/Library/Logs/Agents/hook.log; AGENTS_HOOK_DEBUG=1 adds decisions that
+# normally stay quiet. jq and macOS nc are required.
 
 # Stdin is drained FIRST, before any early exit: Claude Code writes the hook
 # payload into this process's stdin, and exiting before reading it leaves

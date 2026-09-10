@@ -65,6 +65,10 @@ enum HarnessLifecycle {
            let sequence = event.sequence,
            let lastSequence = state.lastSequence,
            sequence <= lastSequence { return false }
+        if !isRegistration(transition),
+           let activeConversation = state.conversationID,
+           let eventConversation = event.conversationID,
+           activeConversation != eventConversation { return false }
         if let turnID = event.turnID, state.settledTurnIDs.contains(turnID),
            !isRegistration(transition) { return false }
         return true
@@ -89,12 +93,11 @@ enum HarnessLifecycle {
 
         if let sequence = event.sequence { next.lastSequence = sequence }
 
-        if case .register(let initial) = transition {
+        if case .register(let initial, let preservingWork) = transition {
             let conversationChanged = next.conversationID != nil
                 && event.conversationID != nil
                 && next.conversationID != event.conversationID
-            let compactStart = event.event == "SessionStart" && event.source == "compact"
-            if conversationChanged && !compactStart {
+            if conversationChanged && !preservingWork {
                 next.blockers = [:]
                 next.settledTurnIDs = []
                 next.outcome = nil
@@ -105,7 +108,7 @@ enum HarnessLifecycle {
             } else if state.runID != event.runID || state.runID == nil {
                 setPhase(&next, initial, at: date)
             }
-            if !compactStart, let conversationID = event.conversationID {
+            if let conversationID = event.conversationID {
                 next.conversationID = conversationID
             }
             return next
@@ -118,15 +121,31 @@ enum HarnessLifecycle {
             next.outcome = nil
             if next.blockers.isEmpty { setPhase(&next, .working, at: date) }
         case .blocked(let id, let reason):
-            if id == "permission", next.blockers.keys.contains(where: { $0.hasPrefix("permission:") }) {
+            next.blockers[id] = .some(reason)
+            next.outcome = nil
+            setPhase(&next, .blocked, at: date)
+        case .aliasedBlocked(let id, let reason, let genericID, let identifiedPrefix):
+            if id == genericID, next.blockers.keys.contains(where: { $0.hasPrefix(identifiedPrefix) }) {
                 return next
             }
+            if id.hasPrefix(identifiedPrefix) { next.blockers.removeValue(forKey: genericID) }
             next.blockers[id] = .some(reason)
             next.outcome = nil
             setPhase(&next, .blocked, at: date)
         case .resolved(let id):
             next.blockers.removeValue(forKey: id)
             if next.blockers.isEmpty { setPhase(&next, .working, at: date) }
+        case .resolvedMany(let ids):
+            for id in ids { next.blockers.removeValue(forKey: id) }
+            if next.blockers.isEmpty { setPhase(&next, .working, at: date) }
+        case .resetConversation:
+            next.conversationID = nil
+            next.blockers = [:]
+            next.completionCount = 0
+            next.seenCompletionCount = 0
+            next.outcome = nil
+            next.settledTurnIDs = []
+            setPhase(&next, .idle, at: date)
         case .settled(let outcome):
             let wasActive = next.phase == .working || next.phase == .blocked
             next.blockers = [:]
@@ -155,9 +174,21 @@ enum HarnessLifecycle {
         case .blocked(let id, let reason):
             next.blockers[id] = .some(reason)
             setPhase(&next, .blocked, at: date)
+        case .aliasedBlocked(let id, let reason, let genericID, let identifiedPrefix):
+            if id == genericID, next.blockers.keys.contains(where: { $0.hasPrefix(identifiedPrefix) }) {
+                return next
+            }
+            if id.hasPrefix(identifiedPrefix) { next.blockers.removeValue(forKey: genericID) }
+            next.blockers[id] = .some(reason)
+            setPhase(&next, .blocked, at: date)
         case .resolved(let id):
             next.blockers.removeValue(forKey: id)
             if next.blockers.isEmpty { setPhase(&next, .working, at: date) }
+        case .resolvedMany(let ids):
+            for id in ids { next.blockers.removeValue(forKey: id) }
+            if next.blockers.isEmpty { setPhase(&next, .working, at: date) }
+        case .resetConversation:
+            break
         default:
             break
         }

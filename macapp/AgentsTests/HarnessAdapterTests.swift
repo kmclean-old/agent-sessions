@@ -17,7 +17,10 @@ final class HarnessAdapterTests: XCTestCase {
             adapter.transition(for: HarnessEvent(
                 agent: "claude", runID: "r", event: "Notification", notificationType: "permission_prompt"
             )),
-            .blocked(id: "permission", reason: nil)
+            .aliasedBlocked(
+                id: "permission", reason: nil,
+                genericID: "permission", identifiedPrefix: "permission:"
+            )
         )
         XCTAssertNil(adapter.transition(for: HarnessEvent(
             agent: "claude", runID: "r", event: "Notification", notificationType: "idle_prompt"
@@ -43,6 +46,100 @@ final class HarnessAdapterTests: XCTestCase {
             at: Date(timeIntervalSince1970: 2)
         )
         XCTAssertEqual(Set(state.blockers.keys), ["permission:request-1"])
+    }
+
+    func testIdentifiedPermissionReplacesEarlierGenericNotificationBlocker() {
+        let adapter = ClaudeHarnessAdapter()
+        var state = HarnessLifecycle.reduce(
+            PaneLifecycle(),
+            event: HarnessEvent(
+                agent: "claude", runID: "r", event: "Notification", notificationType: "permission_prompt"
+            ),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 1)
+        )
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "r", event: "PermissionRequest", requestID: "request-1"
+            ),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 2)
+        )
+        XCTAssertEqual(Set(state.blockers.keys), ["permission:request-1"])
+    }
+
+    func testPermissionAliasesPreserveParallelPermissionsAndQuestions() {
+        let adapter = ClaudeHarnessAdapter()
+        var state = PaneLifecycle()
+        for event in [
+            HarnessEvent(agent: "claude", runID: "r", event: "PermissionRequest", requestID: "one"),
+            HarnessEvent(agent: "claude", runID: "r", event: "PermissionRequest", requestID: "two"),
+            HarnessEvent(
+                agent: "claude", runID: "r", event: "PreToolUse",
+                requestID: "question", toolName: "AskUserQuestion"
+            ),
+            HarnessEvent(
+                agent: "claude", runID: "r", event: "Notification", notificationType: "permission_prompt"
+            )
+        ] {
+            state = HarnessLifecycle.reduce(state, event: event, adapter: adapter, at: Date())
+        }
+        XCTAssertEqual(
+            Set(state.blockers.keys),
+            ["permission:one", "permission:two", "question:question"]
+        )
+    }
+
+    func testPermissionNotificationRequestIDMatchesPostToolResolution() {
+        let adapter = ClaudeHarnessAdapter()
+        var state = HarnessLifecycle.reduce(
+            PaneLifecycle(),
+            event: HarnessEvent(
+                agent: "claude", runID: "r", event: "Notification",
+                requestID: "one", notificationType: "permission_prompt"
+            ),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 1)
+        )
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(agent: "claude", runID: "r", event: "PostToolUse", requestID: "one"),
+            adapter: adapter,
+            at: Date(timeIntervalSince1970: 2)
+        )
+        XCTAssertTrue(state.blockers.isEmpty)
+        XCTAssertEqual(state.phase, .working)
+    }
+
+    func testQuestionCompletionResolvesItsQuestionAndPermissionBlockersAtomically() {
+        let adapter = ClaudeHarnessAdapter()
+        var state = PaneLifecycle()
+        for event in [
+            HarnessEvent(
+                agent: "claude", runID: "r", event: "PermissionRequest",
+                requestID: "ask-1", toolName: "AskUserQuestion"
+            ),
+            HarnessEvent(
+                agent: "claude", runID: "r", event: "PreToolUse",
+                requestID: "ask-1", toolName: "AskUserQuestion"
+            )
+        ] {
+            state = HarnessLifecycle.reduce(state, event: event, adapter: adapter, at: Date())
+        }
+        XCTAssertEqual(Set(state.blockers.keys), ["permission:ask-1", "question:ask-1"])
+
+        state = HarnessLifecycle.reduce(
+            state,
+            event: HarnessEvent(
+                agent: "claude", runID: "r", event: "PostToolUse",
+                requestID: "ask-1", toolName: "AskUserQuestion"
+            ),
+            adapter: adapter,
+            at: Date()
+        )
+        XCTAssertTrue(state.blockers.isEmpty)
+        XCTAssertEqual(state.phase, .working)
     }
 
     func testContinuingStopAndInterruptedToolFailureDoNotComplete() {
@@ -126,6 +223,6 @@ final class HarnessAdapterTests: XCTestCase {
             at: Date(timeIntervalSince1970: 2)
         )
         XCTAssertEqual(state.phase, .working)
-        XCTAssertEqual(state.conversationID, "before")
+        XCTAssertEqual(state.conversationID, "after")
     }
 }

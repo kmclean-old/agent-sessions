@@ -8,10 +8,9 @@ import XCTest
 /// so what these tests pin is exactly that: which signal case each callback
 /// produces, and that it produces one at all.
 ///
-/// No real terminal machinery is involved. The proxy only needs a
-/// `TerminalCenter` to forward to, and `TerminalCenter.onSessionSignal` is a
-/// plain callback, so a bare center with a recording closure is the whole
-/// fixture. (A missing conformance would compile fine and silently never
+/// A center with an unmounted pane and recording callbacks is the fixture.
+/// The pane supplies the generation that makes delegate callbacks current.
+/// (A missing conformance would compile fine and silently never
 /// fire — the package registers specialized delegates by conditional-casting
 /// the single delegate object — which is what makes callback-level coverage
 /// here worth having rather than redundant with the reducer's own tests.)
@@ -40,10 +39,14 @@ final class SessionDelegateProxyTests: XCTestCase {
             self?.receivedAgentEvents.append((id, event))
         }
         self.center = center
-        proxy = SessionDelegateProxy(sessionID: sessionID, paneID: UUID(), center: center)
+        center.ensureSession(sessionID, workingDirectory: "/tmp", restoredResume: nil)
+        let pane = try XCTUnwrap(center.layouts[sessionID]?.initialPane)
+        proxy = SessionDelegateProxy(sessionID: sessionID, paneID: pane,
+                                     generation: try XCTUnwrap(center.paneGeneration(pane)), center: center)
     }
 
     override func tearDown() async throws {
+        center.closeSession(sessionID)
         proxy = nil
         center = nil
         received = []

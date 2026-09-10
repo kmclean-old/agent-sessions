@@ -280,13 +280,14 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         if let layout = layouts[sessionID] {
             for paneID in layout.paneIDs {
                 guard var entry = panes[paneID], entry.controller == nil else { continue }
-                let proxy = SessionDelegateProxy(sessionID: sessionID, paneID: paneID, center: self)
+                entry.generation = UUID()
+                let proxy = SessionDelegateProxy(sessionID: sessionID, paneID: paneID,
+                                                 generation: entry.generation, center: self)
                 let controller = TerminalController(
                     terminalConfiguration: Self.terminalConfiguration
                 )
                 entry.delegateProxy = proxy
                 entry.controller = controller
-                entry.generation = UUID()
                 entry.view.configuration.envVars = Self.sessionEnvVars(
                     for: sessionID, paneID: paneID, generation: entry.generation
                 )
@@ -335,13 +336,14 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     private func makePane(
         sessionID: String, paneID: UUID, workingDirectory: String, command: String? = nil
     ) -> PaneEntry {
-        let proxy = SessionDelegateProxy(sessionID: sessionID, paneID: paneID, center: self)
+        let generation = UUID()
+        let proxy = SessionDelegateProxy(sessionID: sessionID, paneID: paneID,
+                                         generation: generation, center: self)
         // DropTerminalView adds Finder drag-and-drop (the package itself has
         // none) — see its doc comment for why. Per pane, so drag and drop
         // stays fully native in every pane. The stored type stays
         // TerminalView; every caller only needs the base API.
         let view = DropTerminalView(frame: .zero)
-        let generation = UUID()
         view.delegate = proxy
         view.configuration = TerminalSurfaceOptions(
             backend: .exec,
@@ -759,9 +761,14 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// the NEW designate's agent next announces itself, which the hook
     /// does on every prompt.
     func handleAgentSessionEvent(sessionID: String, paneID: UUID, event: AgentSessionEvent) {
+        guard harnessRuns[paneID] == nil else { return }
         if panes[paneID]?.sessionID == sessionID {
             panes[paneID]?.agent = event.name == "SessionEnd" ? nil : event.agent
         }
+        recordAgentSessionEvent(sessionID: sessionID, paneID: paneID, event: event)
+    }
+
+    private func recordAgentSessionEvent(sessionID: String, paneID: UUID, event: AgentSessionEvent) {
         if let layout = layouts[sessionID], resumeDesignatePane(in: layout) != paneID {
             return
         }
@@ -778,6 +785,11 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     }
 
     func paneGeneration(_ paneID: UUID) -> UUID? { panes[paneID]?.generation }
+
+    func acceptsPaneCallback(_ paneID: UUID, generation: UUID) -> Bool {
+        guard let entry = panes[paneID] else { return false }
+        return entry.generation == generation && entry.controller != nil
+    }
 
     func handleControlHarnessEvent(_ report: ControlHarnessEvent) -> String? {
         guard let entry = panes[report.pane], entry.sessionID == report.session,
@@ -807,7 +819,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                    agent: report.event.agent, name: report.event.event, sessionID: conversation,
                    query: report.prompt, home: report.home
                ) {
-                handleAgentSessionEvent(sessionID: report.session, paneID: report.pane, event: event)
+                recordAgentSessionEvent(sessionID: report.session, paneID: report.pane, event: event)
             }
         } else {
             harnessObservations.removeValue(forKey: report.pane)
@@ -879,12 +891,19 @@ final class SessionDelegateProxy:
 {
     let sessionID: String
     let paneID: UUID
+    let generation: UUID
     weak var center: TerminalCenter?
     var suppressesProcessExit = false
-    init(sessionID: String, paneID: UUID, center: TerminalCenter) {
+    init(sessionID: String, paneID: UUID, generation: UUID, center: TerminalCenter) {
         self.sessionID = sessionID
         self.paneID = paneID
+        self.generation = generation
         self.center = center
+    }
+
+    private var liveCenter: TerminalCenter? {
+        guard let center, center.acceptsPaneCallback(paneID, generation: generation) else { return nil }
+        return center
     }
 
     func terminalDidChangeTitle(_ title: String) {
@@ -892,26 +911,26 @@ final class SessionDelegateProxy:
         // (sidebar + window title) unless the user has manually renamed it,
         // and also the window subtitle — see SessionRow.displayName/subtitle
         // and AppStore.setSessionTitle, which persists it onto the row.
-        center?.handleTitleChange(paneID: paneID, title: title)
+        liveCenter?.handleTitleChange(paneID: paneID, title: title)
     }
 
     func terminalDidClose(processAlive: Bool) {
         guard !suppressesProcessExit else { return }
-        center?.handleProcessExit(paneID: paneID)
+        liveCenter?.handleProcessExit(paneID: paneID)
     }
 
     func terminalDidFinishCommand(exitCode: Int?, durationNanos: UInt64) {
-        center?.handleCommandFinished(paneID: paneID)
+        liveCenter?.handleCommandFinished(paneID: paneID)
     }
 
     /// The surface — and with it the pty — now exists. This is the signal
     /// the restore banner waits for: see `TerminalCenter.handleSurfaceAttached`.
     func terminalDidAttachSurface(_ surface: TerminalSurface) {
-        center?.handleSurfaceAttached(paneID: paneID)
+        liveCenter?.handleSurfaceAttached(paneID: paneID)
     }
 
     func terminalDidDetachSurface() {
-        center?.handleSurfaceDetached(paneID: paneID)
+        liveCenter?.handleSurfaceDetached(paneID: paneID)
     }
 
     /// The package dispatches every specialized delegate by conditional-
@@ -937,7 +956,7 @@ final class SessionDelegateProxy:
     func terminalDidRequestDesktopNotification(title: String, body: String) {
         if AgentSessionEvent.isSessionNotification(title: title) {
             if let event = AgentSessionEvent.parseNotification(title: title, body: body) {
-                center?.handleAgentSessionEvent(sessionID: sessionID, paneID: paneID, event: event)
+                liveCenter?.handleAgentSessionEvent(sessionID: sessionID, paneID: paneID, event: event)
             }
             return
         }
@@ -948,7 +967,7 @@ final class SessionDelegateProxy:
         } else {
             signal = .notification(title: title, body: body)
         }
-        center?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: signal)
+        liveCenter?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: signal)
     }
 
     /// A bare BEL — the lowest-fidelity signal in the whole design, carrying
@@ -968,7 +987,7 @@ final class SessionDelegateProxy:
     /// parser consumes it as a string terminator, so our own hook's
     /// `\033]777;...\a` never doubles as a bell.
     func terminalDidRingBell() {
-        center?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: .bell)
+        liveCenter?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: .bell)
     }
 
     /// OSC 9;4 progress reporting, mapped to a semantic signal HERE rather
@@ -999,6 +1018,6 @@ final class SessionDelegateProxy:
         case .remove:
             return
         }
-        center?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: signal)
+        liveCenter?.handleSessionSignal(sessionID: sessionID, paneID: paneID, signal: signal)
     }
 }

@@ -204,7 +204,7 @@ How the app learns the session id depends on the harness:
 |-------------|-------------------------------------------------|------------------------|
 | Claude Code | `hooks/agents-status.sh` (see below)            | `claude --resume <id>` |
 | Codex CLI   | `hooks/agents-status.sh` (see below)            | `codex resume <id>`    |
-| OMP         | OMP's built-in Warp CLI-agent protocol, no setup | `omp --resume <id>`    |
+| OMP         | `hooks/agents-omp.ts` extension                  | `omp --resume <id>`    |
 
 If the harness was running under a non-default configuration home —
 `CODEX_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude Code — the typed
@@ -225,10 +225,9 @@ from a Claude Code session to review its work, say — is not announced. The
 terminal belongs to the outer agent, and the inner one's short-lived session
 is not what you want back after a relaunch.
 
-OMP needs no hook: terminals spawned by Agents opt into OMP's built-in
-CLI-agent protocol, and the app persists what OMP reports. Only OMP's default
-profile is covered — named profiles are not part of that protocol yet, so the
-app cannot construct a profile-qualified resume command for them.
+OMP reports its session and lifecycle through the extension described below.
+Only OMP's default profile is covered. Named profiles do not yet provide enough
+metadata for the app to construct a profile-qualified resume command.
 
 ### When no banner appears
 
@@ -249,27 +248,23 @@ including the sessions it declined to announce.
 
 ## Agent dashboard
 
-The right-side Agent Dashboard is a triage queue of only the sessions that
-need you: a "Blocked on you" section first, then "Waiting for you", each headed
-by its indicator and a count. Every card shows the session, its project and
-workspace, and how long it has been in that state — "now" for the first
-minute, then whole minutes, hours, or days, timed from the moment the state was
-raised or escalated, so a repeated signal never restarts it. Sessions with no
-attention signal are hidden rather than listed at the bottom; the footer still
-counts every open session, so the difference is how many are quiet. When
-sessions are open but none need attention, the pane says so. Selecting a card
-opens that terminal. Use the trailing-sidebar toolbar button to collapse or
-reopen the pane.
+The right-side Agent Dashboard is a triage queue of sessions that need you.
+"Blocked on you" appears first, followed by completed turns you have not yet
+seen. Every card shows the session, project, workspace, and how long it has
+been in that state. Repeated reports do not restart that duration. Selecting a
+card opens its terminal.
 
-The all-quiet state says the hidden sessions are “working or idle” rather than
-“working” on purpose: without a structured status signal, the app cannot
-distinguish a running agent from an idle shell.
+Lifecycle phase and attention are separate. A run's phase is unknown, idle,
+working, or blocked. Gold means a terminal turn event is still unseen, not
+merely that the process is idle. A restored session starts with an unknown
+phase until the harness reports again. No indicator still means that the app
+has no reason to ask for your attention.
 
 ## Waiting indicators
 
 Sessions show an indicator in the sidebar when their agent needs you:
 
-- **Gold dot** — the agent finished its turn. Your move, but nothing is stuck.
+- **Gold dot** — the agent reached a terminal turn event that you have not seen.
 - **Red pulsing exclamation mark** — the agent is blocked on a permission
   prompt and is doing nothing until you answer. Blocked sessions are also
   counted on the Dock tile's badge, so they stay visible when the app isn't
@@ -303,19 +298,19 @@ Selecting a session clears an indicator raised this way. Without a hook,
 
 ### With the hook, for real agent state
 
-`hooks/agents-status.sh` reports the agent's actual state instead of guessing
-at it, by sending one line per hook event to the app's control socket. It's
-optional, and it needs `jq` (and `nc`, which macOS ships).
+`hooks/agents-status.sh` sends each native hook event to the app's control
+socket. The app maps those events to lifecycle phases and attention. The hook
+is optional and needs `jq` plus `nc`, which macOS ships.
 
-What it buys is trust. A session that speaks this protocol is believed over
-keyword classification for the rest of its life, so its red pulse **survives
-you selecting the session** and clears only when the agent says it's
-unblocked — rather than going dark the moment you glance at a session that is
-still, in fact, stuck.
+A live run that speaks this protocol takes authority over keyword
+classification. Its red pulse survives selection and clears only on a matching
+native resolution. A terminal event creates unseen-completion
+attention; viewing the session acknowledges that attention without changing
+the run's idle phase.
 
 The script only speaks when it finds the app's environment — `AGENTS_APP`,
-`AGENTS_CONTROL_SOCK`, `AGENTS_SESSION_ID`, and `AGENTS_PANE_ID`, which this
-app stamps into every pane it spawns. That makes it safe to register
+`AGENTS_CONTROL_SOCK`, `AGENTS_SESSION_ID`, `AGENTS_PANE_ID`, and
+`AGENTS_PANE_GENERATION`, which this app stamps into every new pane. That makes it safe to register
 globally, as below: in iTerm2, Terminal.app, or any other host, the hook
 finds none of them and exits without doing anything.
 
@@ -327,11 +322,11 @@ landing within a second of another one, and cannot tell, because the write
 succeeded. The app still understands the `agents:status` and `agents:session`
 OSC forms from other emitters; the bundled hook no longer uses them.
 
-The same line also announces the agent's session id — and, on each prompt, a
-short preview of what you asked, and the configuration home the harness runs
-under — so the app can print the restore banner described in "Resuming agent
-sessions after a restart". It tells Claude Code and Codex apart by looking at
-the process that invoked it, so nothing needs configuring per harness.
+The same line announces the native session id, a short prompt preview when
+available, and the harness configuration home. It also identifies one harness
+process so the app can observe its real exit. There are no polling processes
+or recurring timers. See [Harness adapters](design/harness-adapters.md) for the
+wire contract and each harness's native-event gaps.
 
 #### Claude Code
 
@@ -360,6 +355,9 @@ rather than replacing it:
     "Notification": [
       { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ],
+    "PermissionRequest": [
+      { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    ],
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ],
@@ -368,23 +366,29 @@ rather than replacing it:
     ],
     "PostToolUse": [
       { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ]
   }
 }
 ```
 
-`Stop` and `Notification` raise the indicator; the rest clear it.
-`PreToolUse`/`PostToolUse` are what clear the red after you approve a
-permission prompt — approving isn't a `UserPromptSubmit`, so nothing else
-would. `SessionStart` and `UserPromptSubmit` are what make the resume hint
-reliable: only `UserPromptSubmit` carries the prompt preview, and only
-`SessionStart` catches a session that never calls a tool.
+`PermissionRequest` and permission notifications block the run. Tool and
+prompt events show work. `Stop` settles a turn unless its native payload says
+that work will continue. `SessionEnd` closes the native conversation; its
+`clear` and `resume` reasons do not imply that the harness process exited. An
+idle prompt is a notification, not proof that a turn completed. `SessionStart`
+and `UserPromptSubmit` also make the resume hint reliable.
 
 If you script this rather than editing by hand — an agent wiring itself up,
 say — merge into the existing file and write the result **in place**.
 `settings.json` is often a symlink into a dotfiles repo, and
 `jq … > tmp && mv tmp settings.json` silently swaps the link for a plain
-copy that the repo never sees again. This merges the hook into all six
+copy that the repo never sees again. This merges the hook into all nine
 events, is safe to re-run, and writes through the link:
 
 ```sh
@@ -399,9 +403,11 @@ jq --arg cmd "$cmd" '
       elif length > 0 then .[0].hooks += [{type: "command", command: $cmd}]
       else [$new + {hooks: [{type: "command", command: $cmd}]}]
       end);
-  ensure("SessionStart"; {}) | ensure("Stop"; {}) | ensure("Notification"; {})
+  ensure("SessionStart"; {}) | ensure("SessionEnd"; {}) | ensure("Stop"; {})
+  | ensure("Notification"; {}) | ensure("PermissionRequest"; {})
   | ensure("UserPromptSubmit"; {}) | ensure("PreToolUse"; {matcher: "*"})
   | ensure("PostToolUse"; {matcher: "*"})
+  | ensure("PostToolUseFailure"; {matcher: "*"})
 ' "$f" > "$f.new" && cat "$f.new" > "$f" && rm "$f.new"
 ```
 
@@ -435,6 +441,12 @@ default — and takes the same shape:
     ],
     "PostToolUse": [
       { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ]
   }
 }
@@ -447,13 +459,13 @@ And Codex requires you to explicitly trust a hook before it will run one; run
 `hooks.json` in place, for the same reason as above.
 
 For a pane identified as Codex by its hooks, Agents also reads Codex's live
-title status. A leading working spinner clears attention; either blinking
-`Action Required` prefix raises it. This clears red when an approved command
-starts running, even though `PostToolUse` may wait for the command to finish.
-It also covers automatic approval review, which can trigger
-`PermissionRequest` without waiting for you. Keep `activity` first in Codex's
-terminal-title settings (the default in 0.153.4) to use this signal. If the
-title has no recognised status, the hook state remains in effect.
+title status. Either blinking `Action Required` prefix raises a generic
+permission blocker. A leading working spinner clears that generic blocker,
+which covers the usual Codex `PermissionRequest` payload that has no request
+ID. A blocker with a native request ID remains until the matching hook event
+resolves it. Keep `activity` first in Codex's terminal-title settings (the
+default in 0.153.4) to use this signal. If the title has no recognised status,
+the hook state remains in effect.
 
 If you run Codex through a wrapper that sets `CODEX_HOME` — a shell function
 such as `cdk () { CODEX_HOME=~/.codex-kira codex "$@"; }` — the hook file
@@ -463,6 +475,20 @@ same `CODEX_HOME=…` prefix, since that is where those sessions live.
 The status hook exits 0 and stays silent on anything it doesn't recognise,
 so it is harmless in terminals other than this app, and under agents that
 send it events it has no opinion about.
+
+#### OMP
+
+Load the bundled extension when starting OMP, using an absolute path:
+
+```sh
+omp --extension /path/to/agents/hooks/agents-omp.ts
+```
+
+`-e` is the short form of `--extension`. For persistent discovery, place a
+symlink to the file in the active profile's `extensions` directory, normally
+`~/.omp/agent/extensions`. The extension reports only in TUI mode and only in
+panes created by Agents. It sends native session, run, approval, question,
+retry, and shutdown events in order. It uses no polling or model calls.
 
 ### Review tools
 

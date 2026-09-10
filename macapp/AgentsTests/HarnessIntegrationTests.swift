@@ -103,6 +103,7 @@ final class HarnessIntegrationTests: XCTestCase {
         center.ensureSession(id, workingDirectory: "/tmp", restoredResume: nil)
         let pane = try XCTUnwrap(center.layouts[id]?.initialPane)
         let generation = try XCTUnwrap(center.paneGeneration(pane))
+        let oldProxy = try XCTUnwrap(center.view(forPane: pane)?.delegate as? SessionDelegateProxy)
         func report(_ generation: UUID, session: String? = nil) -> ControlHarnessEvent {
             ControlHarnessEvent(session: session ?? id, pane: pane, generation: generation,
                                 event: event("registered"), prompt: "Inspect lifecycle", home: nil)
@@ -113,12 +114,26 @@ final class HarnessIntegrationTests: XCTestCase {
         XCTAssertNil(center.handleControlHarnessEvent(report(generation)))
         XCTAssertEqual(store.sessionStates[id]?.phase, .idle)
         XCTAssertEqual(store.sessions[0].resume?.sessionID, "conversation-1")
+        let legacy = try XCTUnwrap(AgentSessionEvent.make(
+            agent: "claude", name: "SessionStart", sessionID: "legacy-conversation", query: nil, home: nil
+        ))
+        center.handleAgentSessionEvent(sessionID: id, paneID: pane, event: legacy)
+        XCTAssertEqual(store.sessions[0].resume?.sessionID, "conversation-1")
         await center.quiesceSessions([id])
         center.resumeSessions([id])
         center.ensureSession(id, workingDirectory: "/tmp", restoredResume: nil)
         XCTAssertNotEqual(center.paneGeneration(pane), generation)
         XCTAssertNotNil(center.handleControlHarnessEvent(report(generation)))
         XCTAssertEqual(store.sessionStates[id]?.phase, .unknown)
+        let replacement = try XCTUnwrap(center.paneGeneration(pane))
+        XCTAssertNil(center.handleControlHarnessEvent(report(replacement)))
+        let titleBeforeStaleCallback = store.sessions[0].agentTitle
+        oldProxy.terminalDidFinishCommand(exitCode: 0, durationNanos: 0)
+        oldProxy.terminalDidChangeTitle("[ ! ] Action Required")
+        oldProxy.terminalDidRequestDesktopNotification(title: "agents:status", body: "blocked")
+        XCTAssertEqual(store.sessionStates[id]?.phase, .idle)
+        XCTAssertTrue(store.paneLifecycle[id]?[pane]?.hasAgent == true)
+        XCTAssertEqual(store.sessions[0].agentTitle, titleBeforeStaleCallback)
         center.closeSession(id)
     }
 

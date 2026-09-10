@@ -55,14 +55,32 @@ test("delivers lifecycle events in order and ignores non-TUI contexts", async ()
 		{ type: "tool_approval_resolved", toolCallId: "call-1", toolName: "bash", approved: true },
 		tui,
 	);
+	await handlers.get("agent_end")!(
+		{ type: "agent_end", willContinue: true, messages: [{ role: "assistant", stopReason: "error" }] },
+		tui,
+	);
+	await handlers.get("agent_end")!(
+		{ type: "agent_end", messages: [{ role: "assistant", stopReason: "error" }] },
+		tui,
+	);
+	await handlers.get("agent_end")!(
+		{ type: "agent_end", messages: [{ role: "assistant", stopReason: "aborted" }] },
+		tui,
+	);
 
 	expect(reports.map(report => report.event)).toEqual([
 		"agent_start",
 		"tool_approval_requested",
 		"tool_approval_resolved",
+		"agent_end",
+		"agent_end",
+		"agent_end",
 	]);
-	expect(reports.map(report => report.sequence)).toEqual([1, 2, 3]);
+	expect(reports.map(report => report.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
 	expect(new Set(reports.map(report => report.run_id)).size).toBe(1);
 	expect(reports[1].request_id).toBe("call-1");
 	expect(reports[2].source).toBe("approved");
+	expect(reports[3]).toMatchObject({ will_continue: true, outcome: "failed" });
+	expect(reports[4]).toMatchObject({ will_continue: false, outcome: "failed", is_interrupt: false });
+	expect(reports[5]).toMatchObject({ outcome: "interrupted", is_interrupt: true });
 });

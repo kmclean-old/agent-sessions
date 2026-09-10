@@ -66,10 +66,13 @@ enum HarnessOutcome: String, Equatable {
 }
 
 enum HarnessTransition: Equatable {
-    case register(initial: HarnessPhase)
+    case register(initial: HarnessPhase, preservingWork: Bool = false)
     case working
     case blocked(id: String, reason: String?)
+    case aliasedBlocked(id: String, reason: String?, genericID: String, identifiedPrefix: String)
     case resolved(id: String)
+    case resolvedMany(ids: [String])
+    case resetConversation
     case settled(outcome: HarnessOutcome)
     case exited
 }
@@ -89,28 +92,30 @@ struct ClaudeHarnessAdapter: HarnessAdapter {
 
     func transition(for event: HarnessEvent) -> HarnessTransition? {
         switch event.event {
-        case "SessionStart": return .register(initial: .idle)
+        case "SessionStart": return .register(initial: .idle, preservingWork: event.source == "compact")
         case "UserPromptSubmit": return .working
         case "PreToolUse" where isQuestionTool(event.toolName):
             return .blocked(id: blockerID("question", event.requestID), reason: event.message)
         case "PreToolUse": return .working
         case "PostToolUse" where isQuestionTool(event.toolName):
-            return .resolved(id: blockerID("question", event.requestID))
+            return questionResolved(event)
         case "PostToolUse": return .resolved(id: blockerID("permission", event.requestID))
         case "PostToolUseFailure" where event.isInterrupt:
             return .settled(outcome: .interrupted)
         case "PostToolUseFailure" where isQuestionTool(event.toolName):
-            return .resolved(id: blockerID("question", event.requestID))
+            return questionResolved(event)
         case "PostToolUseFailure": return .resolved(id: blockerID("permission", event.requestID))
         case "PermissionRequest":
-            return .blocked(id: blockerID("permission", event.requestID), reason: event.message)
+            return permissionBlocked(event)
         case "Notification" where event.notificationType == "permission_prompt":
-            return .blocked(id: event.requestID ?? "permission", reason: event.message)
+            return permissionBlocked(event)
         case "Notification" where event.notificationType == "idle_prompt": return nil
         case "Stop" where event.willContinue: return .working
         case "Stop": return .settled(outcome: event.isInterrupt ? .interrupted : .completed)
         case "Interrupt": return .settled(outcome: .interrupted)
         case "StopFailure": return .settled(outcome: .failed)
+        case "SessionEnd" where ["clear", "resume"].contains(event.source?.lowercased() ?? ""):
+            return .resetConversation
         case "SessionEnd": return .exited
         default: return canonicalTransition(for: event)
         }
@@ -212,4 +217,17 @@ private func blockerID(_ kind: String, _ requestID: String?) -> String {
 
 private func isQuestionTool(_ toolName: String?) -> Bool {
     toolName == "AskUserQuestion" || toolName == "request_user_input"
+}
+
+private func permissionBlocked(_ event: HarnessEvent) -> HarnessTransition {
+    .aliasedBlocked(
+        id: blockerID("permission", event.requestID), reason: event.message,
+        genericID: "permission", identifiedPrefix: "permission:"
+    )
+}
+
+private func questionResolved(_ event: HarnessEvent) -> HarnessTransition {
+    .resolvedMany(ids: [
+        blockerID("question", event.requestID), blockerID("permission", event.requestID)
+    ])
 }
