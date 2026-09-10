@@ -1,6 +1,6 @@
 # Harness adapters
 
-For the planned app-level installer and settings UI, see
+For app-level installation and the settings UI, see
 [Harness integration setup](harness-integration-setup.md).
 
 Agents accepts lifecycle reports from native harness hooks over its control

@@ -298,9 +298,17 @@ Selecting a session clears an indicator raised this way. Without a hook,
 
 ### With the hook, for real agent state
 
-The planned one-time setup in Settings is documented in
-[Harness integration setup](design/harness-integration-setup.md).
-The instructions below cover manual installation.
+Open **Settings → Harness Integrations** to install Claude Code, Codex, or OMP
+reporting once per user configuration home. Choose a detected home or add a
+custom directory, inspect the proposed changes, then Apply. Repair restores
+missing or outdated integration entries; Remove detaches the selected home.
+Codex still requires its native `/hooks` trust review.
+
+The app installs bundled emitters independently of your checkout. Settings
+shows configuration status separately from the last accepted harness report.
+Start a fresh harness in a new Agents pane to check reporting. See
+[Harness integration setup](design/harness-integration-setup.md) for ownership,
+recovery, and compatibility details. The instructions below cover manual setup.
 
 `hooks/agents-status.sh` sends each native hook event to the app's control
 socket. The app maps those events to lifecycle phases and attention. The hook
@@ -446,8 +454,8 @@ default — and takes the same shape:
     "PostToolUse": [
       { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ],
-    "PostToolUseFailure": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
+    "Interrupt": [
+      { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
     ],
     "SessionEnd": [
       { "hooks": [{ "type": "command", "command": "/path/to/agents/hooks/agents-status.sh" }] }
@@ -456,7 +464,7 @@ default — and takes the same shape:
 }
 ```
 
-Two differences from Claude Code. Codex has no `Notification` event —
+Two differences from Claude Code. Codex has no `Notification` or `PostToolUseFailure` event —
 `PermissionRequest` is a first-class event and is what raises the red pulse.
 And Codex requires you to explicitly trust a hook before it will run one; run
 `/hooks` inside Codex to review and approve it. If you script the edit, write
@@ -472,7 +480,7 @@ default in 0.153.4) to use this signal. If the title has no recognised status,
 the hook state remains in effect.
 
 If you run Codex through a wrapper that sets `CODEX_HOME` — a shell function
-such as `cdk () { CODEX_HOME=~/.codex-kira codex "$@"; }` — the hook file
+such as `cdk () { CODEX_HOME=~/.codex-work codex "$@"; }` — the hook file
 belongs under that home, and the restore banner's command will carry the
 same `CODEX_HOME=…` prefix, since that is where those sessions live.
 

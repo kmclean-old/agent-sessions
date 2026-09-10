@@ -41,6 +41,9 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.9.5
+  Yams:
+    url: https://github.com/jpsim/Yams
+    exactVersion: 6.2.2
 
 targets:
   Agents:
@@ -50,11 +53,17 @@ targets:
       - path: Agents
       - path: ../cli/agents-cli
         buildPhase: resources
+      - path: ../hooks/agents-status.sh
+        buildPhase: resources
+      - path: ../hooks/agents-omp.ts
+        buildPhase: resources
     dependencies:
       - package: libghostty-spm
         product: GhosttyTerminal
       - package: Sparkle
         product: Sparkle
+      - package: Yams
+        product: Yams
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kirahowe.agents

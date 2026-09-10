@@ -79,6 +79,9 @@ final class AppStore: ObservableObject {
     /// An active harness lifecycle replaces its pane's legacy contribution.
     private var paneAttention: [String: [UUID: AttentionState]] = [:]
     @Published private(set) var paneLifecycle: [String: [UUID: PaneLifecycle]] = [:]
+    /// Accepted reports seen during this app launch. Events identify a harness,
+    /// but cannot confirm which configuration home installed its integration.
+    @Published private(set) var observedHarnessReports: [String: Date] = [:]
     private let harnessAdapters: HarnessAdapterRegistry
 
     /// Snapshots consumed by the dashboard. Every app session has a summary,
@@ -1056,7 +1059,9 @@ final class AppStore: ObservableObject {
         var previous = paneLifecycle[sessionID]?[paneID] ?? PaneLifecycle()
         previous = HarnessLifecycle.setAttended(previous, attendedSessionID == sessionID)
         guard HarnessLifecycle.accepts(previous, event: event, adapter: adapter) else { return nil }
-        let next = HarnessLifecycle.reduce(previous, event: event, adapter: adapter, at: now())
+        let receivedAt = now()
+        let next = HarnessLifecycle.reduce(previous, event: event, adapter: adapter, at: receivedAt)
+        observedHarnessReports[event.agent] = receivedAt
         // A run owns only its pane. Legacy attention cannot survive a handoff.
         paneAttention[sessionID]?.removeValue(forKey: paneID)
         if next != paneLifecycle[sessionID]?[paneID] {

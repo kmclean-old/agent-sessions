@@ -311,7 +311,7 @@ struct AgentsApp: App {
         // app menu automatically — no CommandGroup wiring needed, unlike
         // every menu item above.
         Settings {
-            SettingsView()
+            SettingsView(store: store)
                 // Reapplied here because the `.tint` on the main Window's
                 // content (above) doesn't reach a separate scene — the same
                 // system-accent-override reasoning applies as there.
