@@ -71,23 +71,12 @@ final class AppStore: ObservableObject {
     }
     @Published var lastError: String?
     @Published var closeWorkspace: CloseWorkspacePresentation?
-    /// What each live session's agents are currently doing, folded to one
-    /// state per session for the sidebar/dashboard/badge. Derived — only
-    /// `recombineAttention(for:)` writes it — from `paneAttention` below,
-    /// where the actual signal reduction happens per pane. Deliberately NOT
-    /// part of `PersistedState`/`save()`/`load()`: this describes live
-    /// processes' current state, which has no meaningful value to restore
-    /// after a relaunch — see `SessionActivity`'s doc comment.
+    /// Session attention for the sidebar and badge, derived from per-pane
+    /// lifecycle and legacy signals. Runtime state is never persisted.
     @Published private(set) var attention: [String: AttentionState] = [:]
 
-    /// The source of truth behind `attention`: one reduced `AttentionState`
-    /// per PANE, keyed session → pane. The reducer's unit is one agent's
-    /// signal stream, and with split panes that is a pane, not a session —
-    /// reducing all of a session's panes into one state would let one
-    /// pane's clear erase another pane's still-open blocked indicator, and
-    /// would let the first structured pane latch every sibling out of the
-    /// classifier path. Written only by `apply(_:toSession:pane:)`,
-    /// `setAttended`, and the pane-close pruning.
+    /// Legacy attention stays per pane so one stream cannot clear a sibling.
+    /// An active harness lifecycle replaces its pane's legacy contribution.
     private var paneAttention: [String: [UUID: AttentionState]] = [:]
     @Published private(set) var paneLifecycle: [String: [UUID: PaneLifecycle]] = [:]
     private let harnessAdapters: HarnessAdapterRegistry
@@ -100,6 +89,11 @@ final class AppStore: ObservableObject {
                 panes: paneLifecycle[session.id] ?? [:], attention: combinedPaneAttention(session.id)
             ))
         })
+    }
+
+    var dashboardSnapshot: AgentDashboardSnapshot {
+        AgentDashboardSnapshot(sessions: sessions, projects: projects, workspaces: workspaces,
+                               states: sessionStates, selectedSessionID: selection)
     }
     /// The clock `AttentionState.since` is stamped from. A settable closure
     /// rather than an inline `Date()` so tests can pin it and assert exact

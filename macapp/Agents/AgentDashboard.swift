@@ -1,5 +1,14 @@
 import Foundation
 
+/// Display data only; the dashboard cannot mutate the store through this value.
+struct AgentDashboardSnapshot {
+    let sessions: [SessionRow]
+    let projects: [Project]
+    let workspaces: [WorkspaceRow]
+    let states: [String: SessionLifecycleSummary]
+    let selectedSessionID: String?
+}
+
 /// One row the Agent Dashboard shows: a session together with the
 /// non-optional attention state that earned it a place in the list.
 struct AgentDashboardEntry: Identifiable, Equatable {

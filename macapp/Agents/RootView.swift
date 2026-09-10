@@ -62,10 +62,7 @@ struct RootView: View {
             }
         }
         .inspector(isPresented: $isDashboardPresented) {
-            AgentDashboardView(
-                sessions: store.sessions, projects: store.projects, workspaces: store.workspaces,
-                states: store.sessionStates, selectedSessionID: store.selection
-            ) { sessionID, paneID in
+            AgentDashboardView(snapshot: store.dashboardSnapshot) { sessionID, paneID in
                 store.selection = sessionID
                 if let paneID { center.focusPane(paneID) }
             }

@@ -15,20 +15,16 @@ import SwiftUI
 /// Owning the layout sidesteps both and keeps the urgency tint, hover, and
 /// selection styling in one place.
 struct AgentDashboardView: View {
-    let sessions: [SessionRow]
-    let projects: [Project]
-    let workspaces: [WorkspaceRow]
-    let states: [String: SessionLifecycleSummary]
-    let selectedSessionID: String?
+    let snapshot: AgentDashboardSnapshot
     let onSelect: (String, UUID?) -> Void
 
     private var entries: [AgentDashboardEntry] {
-        AgentDashboard.entries(sessions: sessions, states: states)
+        AgentDashboard.entries(sessions: snapshot.sessions, states: snapshot.states)
     }
 
     var body: some View {
         Group {
-            if sessions.isEmpty {
+            if snapshot.sessions.isEmpty {
                 ContentUnavailableView("No active sessions", systemImage: "rectangle.stack")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if entries.isEmpty {
@@ -88,8 +84,7 @@ struct AgentDashboardView: View {
 
                 ForEach(rows) { entry in
                     AttentionCard(
-                        projects: projects, workspaces: workspaces, selectedSessionID: selectedSessionID,
-                        entry: entry, onSelect: onSelect
+                        snapshot: snapshot, entry: entry, onSelect: onSelect
                     )
                 }
             }
@@ -110,7 +105,7 @@ struct AgentDashboardView: View {
     /// Counts every open session, not just the listed ones, so the reader
     /// can tell how many the queue is hiding.
     private var footerText: String {
-        let total = sessions.count
+        let total = snapshot.sessions.count
         let quiet = total - entries.count
         let sessions = "\(total) session\(total == 1 ? "" : "s")"
         return quiet == 0 ? "\(sessions) · none quiet" : "\(sessions) · \(quiet) quiet"
@@ -119,9 +114,9 @@ struct AgentDashboardView: View {
     /// Wording for the all-quiet state, matching the README: no signal means
     /// the agent may be working or idle, never a claim that it's running.
     private var quietDescription: String {
-        let working = states.values.filter { $0.phase == .working }.count
-        let idle = states.values.filter { $0.phase == .idle }.count
-        let unknown = states.values.filter { $0.phase == .unknown }.count
+        let working = snapshot.states.values.filter { $0.phase == .working }.count
+        let idle = snapshot.states.values.filter { $0.phase == .idle }.count
+        let unknown = snapshot.states.values.filter { $0.phase == .unknown }.count
         return [(working, "working"), (idle, "idle"), (unknown, "without agent state")]
             .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
     }
@@ -132,16 +127,14 @@ struct AgentDashboardView: View {
 /// is shown with the accent border rather than a tinted fill so it can never
 /// be confused with the red/gold urgency tint the fill already carries.
 private struct AttentionCard: View {
-    let projects: [Project]
-    let workspaces: [WorkspaceRow]
-    let selectedSessionID: String?
+    let snapshot: AgentDashboardSnapshot
     let entry: AgentDashboardEntry
     let onSelect: (String, UUID?) -> Void
 
     @State private var isHovered = false
 
     private var session: SessionRow { entry.session }
-    private var isSelected: Bool { selectedSessionID == session.id }
+    private var isSelected: Bool { snapshot.selectedSessionID == session.id }
     private var tint: Color { entry.activity.tint }
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 8, style: .continuous) }
 
@@ -208,14 +201,14 @@ private struct AttentionCard: View {
     }
 
     private var contextText: String {
-        guard let project = projects.first(where: { $0.path == session.projectPath }) else {
+        guard let project = snapshot.projects.first(where: { $0.path == session.projectPath }) else {
             return projectFallback
         }
         switch session.target {
         case .root:
             return project.name
         case .workspace(_, let name):
-            guard let workspace = workspaces.first(where: {
+            guard let workspace = snapshot.workspaces.first(where: {
                 $0.projectPath == project.path && $0.name == name
             }) else {
                 return "\(project.name) · \(name) (workspace unavailable)"
