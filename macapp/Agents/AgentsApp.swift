@@ -97,6 +97,10 @@ struct AgentsApp: App {
         controlServer.applySessionEvent = { [weak center] event in
             Self.applySessionEvent(event, to: center)
         }
+        controlServer.applyHarnessEvent = { [weak center] event in
+            guard let center else { return "app is shutting down" }
+            return center.handleControlHarnessEvent(event)
+        }
 
         let uiState = UIState()
         self.uiState = uiState

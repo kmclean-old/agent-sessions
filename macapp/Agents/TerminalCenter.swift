@@ -22,6 +22,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         var lastTitle: String?
         /// Live harness name used to interpret terminal status signals.
         var agent: String?
+        var generation: UUID
         /// When the pane is safe to type into — the surface built, the shell
         /// at its prompt — kept as a pure state machine so the transitions
         /// are unit-tested without a live surface (see `TerminalReadiness`).
@@ -38,6 +39,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     }
 
     private var panes: [UUID: PaneEntry] = [:]
+    private var harnessRuns: [UUID: String] = [:]
+    private var harnessObservations: [UUID: HarnessProcessObservation] = [:]
     private var resumeHints: [String: ResumeHintState] = [:]
 
     /// Who owns each session's current resume record. Distinct from the
@@ -186,7 +189,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     ///
     /// Sessions share a control socket; each pane identifies its session and
     /// itself so hook events reach the correct status and resume record.
-    static func sessionEnvVars(for sessionID: String, paneID: UUID? = nil) -> [String: String] {
+    static func sessionEnvVars(for sessionID: String, paneID: UUID? = nil, generation: UUID? = nil) -> [String: String] {
         var env = [
             "AGENTS_APP": "1",
             "AGENTS_SESSION_ID": sessionID,
@@ -197,6 +200,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         if let paneID {
             env["AGENTS_PANE_ID"] = paneID.uuidString
         }
+        if let generation { env["AGENTS_PANE_GENERATION"] = generation.uuidString }
         return env
     }
 
@@ -212,6 +216,9 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// reduce each pane's stream separately before folding the results into
     /// the one session-row indicator. See `SessionTerminating.onSessionSignal`.
     var onSessionSignal: ((String, UUID, AttentionSignal) -> Void)?
+    var onHarnessEvent: ((String, UUID, HarnessEvent) -> PaneLifecycle?)?
+    var onHarnessTitle: ((String, UUID, String) -> Bool)?
+    var onHarnessEnded: ((String, UUID) -> Void)?
 
     /// Invoked with (sessionID, paneID) after any pane's surface is freed,
     /// on every teardown path. See `SessionTerminating.onPaneClosed`.
@@ -279,6 +286,10 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                 )
                 entry.delegateProxy = proxy
                 entry.controller = controller
+                entry.generation = UUID()
+                entry.view.configuration.envVars = Self.sessionEnvVars(
+                    for: sessionID, paneID: paneID, generation: entry.generation
+                )
                 entry.view.delegate = proxy
                 panes[paneID] = entry
                 // The kept view still carries the configuration it was
@@ -330,11 +341,12 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         // stays fully native in every pane. The stored type stays
         // TerminalView; every caller only needs the base API.
         let view = DropTerminalView(frame: .zero)
+        let generation = UUID()
         view.delegate = proxy
         view.configuration = TerminalSurfaceOptions(
             backend: .exec,
             workingDirectory: workingDirectory,
-            envVars: Self.sessionEnvVars(for: sessionID, paneID: paneID),
+            envVars: Self.sessionEnvVars(for: sessionID, paneID: paneID, generation: generation),
             command: command
         )
         let controller = TerminalController(terminalConfiguration: Self.terminalConfiguration)
@@ -343,7 +355,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         // hook's log ("unknown pane …") can be matched against this line.
         NSLog("Agents: spawned pane \(paneID.uuidString) for session \(sessionID)")
         return PaneEntry(
-            sessionID: sessionID, view: view, controller: controller, delegateProxy: proxy
+            sessionID: sessionID, view: view, controller: controller, delegateProxy: proxy,
+            generation: generation
         )
     }
 
@@ -625,6 +638,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                 teardownPaneEntry(paneID)
             }
             guard var entry = panes[survivor] else { continue }
+            harnessObservations.removeValue(forKey: survivor)
+            harnessRuns.removeValue(forKey: survivor)
             entry.delegateProxy.suppressesProcessExit = true
             entry.view.delegate = nil
             entry.view.removeFromSuperview()
@@ -711,7 +726,8 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         // was waiting on.
         let firstPrompt = entry.readiness.notePrompt()
         panes[paneID] = entry
-        if entry.agent == "codex", let status = CodexTitleStatus.parse(title) {
+        let owned = onHarnessTitle?(entry.sessionID, paneID, title) ?? false
+        if !owned, entry.agent == "codex", let status = CodexTitleStatus.parse(title) {
             handleSessionSignal(sessionID: entry.sessionID, paneID: paneID, signal: .structured(status))
         }
         if firstPrompt {
@@ -755,7 +771,50 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
 
     /// Clear live harness identity when the shell regains its prompt.
     func handleCommandFinished(paneID: UUID) {
+        harnessObservations.removeValue(forKey: paneID)
+        harnessRuns.removeValue(forKey: paneID)
+        if let entry = panes[paneID] { onHarnessEnded?(entry.sessionID, paneID) }
         panes[paneID]?.agent = nil
+    }
+
+    func paneGeneration(_ paneID: UUID) -> UUID? { panes[paneID]?.generation }
+
+    func handleControlHarnessEvent(_ report: ControlHarnessEvent) -> String? {
+        guard let entry = panes[report.pane], entry.sessionID == report.session,
+              entry.controller != nil else { return "unknown or inactive pane" }
+        guard entry.generation == report.generation else { return "stale pane generation" }
+        guard let state = onHarnessEvent?(report.session, report.pane, report.event) else {
+            return "stale or unsupported harness event"
+        }
+        if state.hasAgent {
+            panes[report.pane]?.agent = state.agent
+            if harnessRuns[report.pane] != state.runID {
+                harnessObservations.removeValue(forKey: report.pane)
+                harnessRuns[report.pane] = state.runID
+            }
+            if harnessObservations[report.pane] == nil, let pid = report.event.processID {
+                let paneID = report.pane
+                let generation = report.generation
+                let run = state.runID
+                harnessObservations[paneID] = HarnessProcessObservation(pid: pid) { [weak self] in
+                    guard let self, self.panes[paneID]?.generation == generation,
+                          self.harnessRuns[paneID] == run else { return }
+                    self.handleCommandFinished(paneID: paneID)
+                }
+            }
+            if let conversation = report.event.conversationID,
+               let event = AgentSessionEvent.make(
+                   agent: report.event.agent, name: report.event.event, sessionID: conversation,
+                   query: report.prompt, home: report.home
+               ) {
+                handleAgentSessionEvent(sessionID: report.session, paneID: report.pane, event: event)
+            }
+        } else {
+            harnessObservations.removeValue(forKey: report.pane)
+            harnessRuns.removeValue(forKey: report.pane)
+            panes[report.pane]?.agent = nil
+        }
+        return nil
     }
 
     /// Applies one hook event delivered over the control socket, returning

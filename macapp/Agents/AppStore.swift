@@ -89,6 +89,18 @@ final class AppStore: ObservableObject {
     /// classifier path. Written only by `apply(_:toSession:pane:)`,
     /// `setAttended`, and the pane-close pruning.
     private var paneAttention: [String: [UUID: AttentionState]] = [:]
+    @Published private(set) var paneLifecycle: [String: [UUID: PaneLifecycle]] = [:]
+    private let harnessAdapters: HarnessAdapterRegistry
+
+    /// Snapshots consumed by the dashboard. Every app session has a summary,
+    /// including sessions whose harness has not reported a state.
+    var sessionStates: [String: SessionLifecycleSummary] {
+        Dictionary(uniqueKeysWithValues: sessions.map { session in
+            (session.id, SessionLifecycleSummary(
+                panes: paneLifecycle[session.id] ?? [:], attention: combinedPaneAttention(session.id)
+            ))
+        })
+    }
     /// The clock `AttentionState.since` is stamped from. A settable closure
     /// rather than an inline `Date()` so tests can pin it and assert exact
     /// timestamps through `apply` and the pane fold below.
@@ -214,16 +226,27 @@ final class AppStore: ObservableObject {
     init(
         terminals: any SessionTerminating,
         stateURL: URL,
-        engine: any WorkspaceEngineProviding = WorkspaceEngineCLI()
+        engine: any WorkspaceEngineProviding = WorkspaceEngineCLI(),
+        harnessAdapters: HarnessAdapterRegistry = HarnessAdapterRegistry()
     ) {
         self.terminals = terminals
         self.stateURL = stateURL
         self.engine = engine
+        self.harnessAdapters = harnessAdapters
         terminals.onProcessExit = { [weak self] id in
             self?.closeSession(id)
         }
         terminals.onSessionSignal = { [weak self] id, paneID, signal in
             self?.apply(signal, toSession: id, pane: paneID)
+        }
+        terminals.onHarnessEvent = { [weak self] id, pane, event in
+            self?.applyHarnessEvent(event, toSession: id, pane: pane)
+        }
+        terminals.onHarnessTitle = { [weak self] id, pane, title in
+            self?.applyHarnessTitle(title, toSession: id, pane: pane) ?? false
+        }
+        terminals.onHarnessEnded = { [weak self] id, pane in
+            self?.endHarness(in: id, pane: pane)
         }
         terminals.onPaneClosed = { [weak self] id, paneID in
             self?.removePaneAttention(sessionID: id, pane: paneID)
@@ -1032,6 +1055,58 @@ final class AppStore: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func applyHarnessEvent(_ event: HarnessEvent, toSession sessionID: String, pane paneID: UUID) -> PaneLifecycle? {
+        guard sessions.contains(where: { $0.id == sessionID }) else { return nil }
+        let adapter = harnessAdapters.adapter(for: event.agent)
+        var previous = paneLifecycle[sessionID]?[paneID] ?? PaneLifecycle()
+        previous = HarnessLifecycle.setAttended(previous, attendedSessionID == sessionID)
+        guard HarnessLifecycle.accepts(previous, event: event, adapter: adapter) else { return nil }
+        let next = HarnessLifecycle.reduce(previous, event: event, adapter: adapter, at: now())
+        // A run owns only its pane. Legacy attention cannot survive a handoff.
+        paneAttention[sessionID]?.removeValue(forKey: paneID)
+        if next != paneLifecycle[sessionID]?[paneID] {
+            paneLifecycle[sessionID, default: [:]][paneID] = next
+            recombineAttention(for: sessionID)
+        }
+        return next
+    }
+
+    @discardableResult
+    func applyHarnessTitle(_ title: String, toSession sessionID: String, pane paneID: UUID) -> Bool {
+        guard let previous = paneLifecycle[sessionID]?[paneID], let agent = previous.agent,
+              previous.hasAgent else { return false }
+        let next = HarnessLifecycle.observeTitle(
+            previous, title: title, adapter: harnessAdapters.adapter(for: agent), at: now()
+        )
+        if next != previous {
+            paneLifecycle[sessionID]?[paneID] = next
+            recombineAttention(for: sessionID)
+        }
+        return true
+    }
+
+    func endHarness(in sessionID: String, pane paneID: UUID) {
+        paneAttention[sessionID]?.removeValue(forKey: paneID)
+        if let previous = paneLifecycle[sessionID]?[paneID] {
+            paneLifecycle[sessionID]?[paneID] = HarnessLifecycle.endRun(previous, at: now())
+        }
+        recombineAttention(for: sessionID)
+    }
+
+    private func combinedPaneAttention(_ sessionID: String) -> [UUID: AttentionState] {
+        var result = paneAttention[sessionID] ?? [:]
+        for (id, state) in paneLifecycle[sessionID] ?? [:] where state.hasAgent {
+            let activity: SessionActivity? = state.phase == .blocked ? .blocked
+                : state.unseenCompletion ? .yourTurn : nil
+            result[id] = AttentionState(
+                activity: activity, isStructured: true, isAttended: state.attended,
+                since: activity == nil ? nil : state.since
+            )
+        }
+        return result
+    }
+
     /// The single funnel for every pane attention signal, from every source
     /// — nothing else in the app may write `paneAttention`. Ignores ids
     /// with no matching row in `sessions` — a signal racing that session's
@@ -1046,6 +1121,7 @@ final class AppStore: ObservableObject {
     /// as looked-at as its siblings — its first bell must not light the row.
     func apply(_ signal: AttentionSignal, toSession sessionID: String, pane paneID: UUID) {
         guard sessions.contains(where: { $0.id == sessionID }) else { return }
+        guard paneLifecycle[sessionID]?[paneID]?.hasAgent != true else { return }
         let seed = AttentionState(
             activity: nil, isStructured: false, isAttended: attendedSessionID == sessionID
         )
@@ -1059,7 +1135,8 @@ final class AppStore: ObservableObject {
     /// `SessionTerminating.onPaneClosed`. Without this, a pane closed while
     /// blocked would keep its session's row red forever.
     private func removePaneAttention(sessionID: String, pane paneID: UUID) {
-        guard paneAttention[sessionID]?.removeValue(forKey: paneID) != nil else { return }
+        paneLifecycle[sessionID]?.removeValue(forKey: paneID)
+        paneAttention[sessionID]?.removeValue(forKey: paneID)
         if paneAttention[sessionID]?.isEmpty == true {
             paneAttention.removeValue(forKey: sessionID)
         }
@@ -1076,7 +1153,8 @@ final class AppStore: ObservableObject {
     /// the identity, so nothing about single-pane behavior changes.
     private func recombineAttention(for sessionID: String) {
         let isAttended = attendedSessionID == sessionID
-        guard let states = paneAttention[sessionID].map(Array.init), !states.isEmpty else {
+        let states = Array(combinedPaneAttention(sessionID))
+        guard !states.isEmpty else {
             // No pane has ever signaled. Attended sessions still materialize
             // an entry: `isAttended` must be readable the moment the user
             // selects a row, signals or not.
@@ -1107,6 +1185,9 @@ final class AppStore: ObservableObject {
     /// a session (suppression and clears happen per pane, in the reducer),
     /// then refolds the row's entry.
     private func setAttended(_ sessionID: String, _ isAttended: Bool) {
+        if let states = paneLifecycle[sessionID] {
+            paneLifecycle[sessionID] = states.mapValues { HarnessLifecycle.setAttended($0, isAttended) }
+        }
         if var panes = paneAttention[sessionID] {
             for (paneID, state) in panes {
                 panes[paneID] = SessionAttention.reduce(
@@ -1300,6 +1381,7 @@ final class AppStore: ObservableObject {
         let liveIDs = Set(sessions.map(\.id))
         attention = attention.filter { liveIDs.contains($0.key) }
         paneAttention = paneAttention.filter { liveIDs.contains($0.key) }
+        paneLifecycle = paneLifecycle.filter { liveIDs.contains($0.key) }
     }
 
     /// A manual rename writes `customName`, not `name`: it must win over —

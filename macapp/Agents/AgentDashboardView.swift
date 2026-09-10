@@ -15,15 +15,20 @@ import SwiftUI
 /// Owning the layout sidesteps both and keeps the urgency tint, hover, and
 /// selection styling in one place.
 struct AgentDashboardView: View {
-    @ObservedObject var store: AppStore
+    let sessions: [SessionRow]
+    let projects: [Project]
+    let workspaces: [WorkspaceRow]
+    let states: [String: SessionLifecycleSummary]
+    let selectedSessionID: String?
+    let onSelect: (String, UUID?) -> Void
 
     private var entries: [AgentDashboardEntry] {
-        AgentDashboard.entries(sessions: store.sessions, attention: store.attention)
+        AgentDashboard.entries(sessions: sessions, states: states)
     }
 
     var body: some View {
         Group {
-            if store.sessions.isEmpty {
+            if sessions.isEmpty {
                 ContentUnavailableView("No active sessions", systemImage: "rectangle.stack")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if entries.isEmpty {
@@ -82,7 +87,10 @@ struct AgentDashboardView: View {
                 .accessibilityAddTraits(.isHeader)
 
                 ForEach(rows) { entry in
-                    AttentionCard(store: store, entry: entry)
+                    AttentionCard(
+                        projects: projects, workspaces: workspaces, selectedSessionID: selectedSessionID,
+                        entry: entry, onSelect: onSelect
+                    )
                 }
             }
         }
@@ -102,7 +110,7 @@ struct AgentDashboardView: View {
     /// Counts every open session, not just the listed ones, so the reader
     /// can tell how many the queue is hiding.
     private var footerText: String {
-        let total = store.sessions.count
+        let total = sessions.count
         let quiet = total - entries.count
         let sessions = "\(total) session\(total == 1 ? "" : "s")"
         return quiet == 0 ? "\(sessions) · none quiet" : "\(sessions) · \(quiet) quiet"
@@ -111,8 +119,11 @@ struct AgentDashboardView: View {
     /// Wording for the all-quiet state, matching the README: no signal means
     /// the agent may be working or idle, never a claim that it's running.
     private var quietDescription: String {
-        let total = store.sessions.count
-        return "\(total) session\(total == 1 ? "" : "s") \(total == 1 ? "is" : "are") working or idle"
+        let working = states.values.filter { $0.phase == .working }.count
+        let idle = states.values.filter { $0.phase == .idle }.count
+        let unknown = states.values.filter { $0.phase == .unknown }.count
+        return [(working, "working"), (idle, "idle"), (unknown, "without agent state")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
     }
 }
 
@@ -121,13 +132,16 @@ struct AgentDashboardView: View {
 /// is shown with the accent border rather than a tinted fill so it can never
 /// be confused with the red/gold urgency tint the fill already carries.
 private struct AttentionCard: View {
-    @ObservedObject var store: AppStore
+    let projects: [Project]
+    let workspaces: [WorkspaceRow]
+    let selectedSessionID: String?
     let entry: AgentDashboardEntry
+    let onSelect: (String, UUID?) -> Void
 
     @State private var isHovered = false
 
     private var session: SessionRow { entry.session }
-    private var isSelected: Bool { store.selection == session.id }
+    private var isSelected: Bool { selectedSessionID == session.id }
     private var tint: Color { entry.activity.tint }
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 8, style: .continuous) }
 
@@ -139,7 +153,7 @@ private struct AttentionCard: View {
         TimelineView(.everyMinute) { context in
             let elapsed = entry.since.map { AgentDashboard.elapsed(since: $0, now: context.date) }
             Button {
-                store.selection = session.id
+                onSelect(session.id, entry.paneID)
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
@@ -149,6 +163,12 @@ private struct AttentionCard: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                        if let reason = entry.reason {
+                            Text(reason)
+                                .font(.caption)
+                                .foregroundStyle(tint)
+                                .lineLimit(2)
+                        }
                     }
                     Spacer(minLength: 8)
                     if let elapsed {
@@ -188,14 +208,14 @@ private struct AttentionCard: View {
     }
 
     private var contextText: String {
-        guard let project = store.projects.first(where: { $0.path == session.projectPath }) else {
+        guard let project = projects.first(where: { $0.path == session.projectPath }) else {
             return projectFallback
         }
         switch session.target {
         case .root:
             return project.name
         case .workspace(_, let name):
-            guard let workspace = store.workspaces.first(where: {
+            guard let workspace = workspaces.first(where: {
                 $0.projectPath == project.path && $0.name == name
             }) else {
                 return "\(project.name) · \(name) (workspace unavailable)"

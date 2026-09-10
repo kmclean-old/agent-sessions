@@ -80,11 +80,33 @@ final class ControlServer: @unchecked Sendable {
         /// The harness's configuration home (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`)
         /// when the hook's environment had one — see `SessionResumeMetadata.home`.
         let agentHome: String?
+        let version: Int?
+        let generation: UUID?
+        let runID: String?
+        let pid: Int32?
+        let turnID: String?
+        let requestID: String?
+        let message: String?
+        let outcome: String?
+        let toolName: String?
+        let notificationType: String?
+        let source: String?
+        let willContinue: Bool?
+        let isInterrupt: Bool?
+        let sequence: UInt64?
 
         private enum CodingKeys: String, CodingKey {
             case cmd, session, pane, event, status, agent, prompt
             case agentSessionID = "agent_session_id"
             case agentHome = "agent_home"
+            case version, generation, pid, message, outcome, source, sequence
+            case runID = "run_id"
+            case turnID = "turn_id"
+            case requestID = "request_id"
+            case toolName = "tool_name"
+            case notificationType = "notification_type"
+            case willContinue = "will_continue"
+            case isInterrupt = "is_interrupt"
         }
     }
 
@@ -95,6 +117,7 @@ final class ControlServer: @unchecked Sendable {
     enum RequestDecision: Equatable {
         case refuse(String)
         case sessionEvent(ControlSessionEvent)
+        case harnessEvent(ControlHarnessEvent)
     }
 
     static func decide(line: String) -> RequestDecision {
@@ -103,8 +126,39 @@ final class ControlServer: @unchecked Sendable {
         }
         switch request.cmd {
         case "session-event": return decideSessionEvent(request)
+        case "harness-event": return decideHarnessEvent(request)
         default: return .refuse("unknown cmd: \(request.cmd)")
         }
+    }
+
+    private static func decideHarnessEvent(_ request: Request) -> RequestDecision {
+        guard request.version == 1 else { return .refuse("unsupported harness-event version") }
+        guard let session = request.session, !session.isEmpty,
+              let pane = request.pane.flatMap(UUID.init(uuidString:)),
+              let generation = request.generation else {
+            return .refuse("harness-event requires session, pane and generation")
+        }
+        guard let agent = request.agent?.trimmingCharacters(in: .whitespacesAndNewlines), !agent.isEmpty,
+              let run = request.runID?.trimmingCharacters(in: .whitespacesAndNewlines), !run.isEmpty,
+              let name = request.event?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return .refuse("harness-event requires agent, run_id and event")
+        }
+        guard request.pid.map({ $0 > 1 }) ?? true else { return .refuse("invalid harness pid") }
+        if let outcome = request.outcome, HarnessOutcome(rawValue: outcome) == nil {
+            return .refuse("unknown harness outcome")
+        }
+        let event = HarnessEvent(
+            agent: agent.lowercased(), runID: run, conversationID: request.agentSessionID,
+            event: name, processID: request.pid, turnID: request.turnID,
+            requestID: request.requestID, message: request.message, outcome: request.outcome,
+            toolName: request.toolName, notificationType: request.notificationType,
+            willContinue: request.willContinue ?? false, isInterrupt: request.isInterrupt ?? false,
+            sequence: request.sequence, source: request.source
+        )
+        return .harnessEvent(ControlHarnessEvent(
+            session: session, pane: pane, generation: generation, event: event,
+            prompt: request.prompt, home: request.agentHome
+        ))
     }
 
     /// Every refusal here is a contract violation by the sender, not a
@@ -179,6 +233,7 @@ final class ControlServer: @unchecked Sendable {
     /// paths the event feeds. Like `validateSession`, unwired means
     /// refused: the hook's next event carries the same facts again.
     @MainActor var applySessionEvent: ((ControlSessionEvent) -> String?)?
+    @MainActor var applyHarnessEvent: ((ControlHarnessEvent) -> String?)?
 
     init(socketPath: String = ControlServer.socketPath) {
         self.path = socketPath
@@ -369,6 +424,20 @@ final class ControlServer: @unchecked Sendable {
             reply(to: client, ok: false, error: error)
         case .sessionEvent(let event):
             serveSessionEvent(client: client, event: event)
+        case .harnessEvent(let event):
+            Task { @MainActor [weak self] in
+                guard let self else { close(client); return }
+                guard self.validateSession?(event.session) == true else {
+                    self.reply(to: client, ok: false, error: "unknown session: \(event.session)")
+                    return
+                }
+                guard let apply = self.applyHarnessEvent else {
+                    self.reply(to: client, ok: false, error: "harness events are not wired")
+                    return
+                }
+                let error = apply(event)
+                self.reply(to: client, ok: error == nil, error: error)
+            }
         }
     }
 
@@ -426,6 +495,15 @@ final class ControlServer: @unchecked Sendable {
         }
         return String(decoding: bytes, as: UTF8.self)
     }
+}
+
+struct ControlHarnessEvent: Equatable {
+    let session: String
+    let pane: UUID
+    let generation: UUID
+    let event: HarnessEvent
+    let prompt: String?
+    let home: String?
 }
 
 /// One hook event for one pane, as delivered over the control socket by

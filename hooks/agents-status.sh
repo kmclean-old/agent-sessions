@@ -132,6 +132,7 @@ sid=$(printf '%s' "$input" | jq -r '.session_id // empty')
 # the header). `ps -o comm=` on macOS prints the executable's path (a login
 # shell prints "-/bin/zsh"); the basename is what gets matched.
 AGENT=""
+AGENT_PID=""
 NESTED_IN=""
 find_agent() {
     local pid=$$ c base
@@ -143,6 +144,7 @@ find_agent() {
             claude*|codex*)
                 if [ -z "$AGENT" ]; then
                     AGENT=${base%%[!a-z]*}
+                    AGENT_PID=$pid
                 else
                     NESTED_IN=${base%%[!a-z]*}
                     return
@@ -162,6 +164,67 @@ fi
 # equivalent marker). With neither, the line goes out without a session.
 if [ -z "$AGENT" ] && [ -n "${CLAUDECODE:-}" ]; then
     AGENT="claude"
+fi
+
+# The versioned lifecycle protocol needs an OS process identity. A native
+# conversation id is deliberately not used as the run id because a resumed
+# conversation starts a new harness process. Hooks from that process share the
+# ancestor PID and its kernel-reported start stamp. If the process walk did not
+# find the harness, retain the legacy report below rather than attaching made-up
+# process data to a lifecycle event.
+generation="${AGENTS_PANE_GENERATION:-}"
+if [ -n "$generation" ] && [ -n "$AGENT_PID" ]; then
+    # Claude includes agent_id for subagent hooks. They belong to the root
+    # harness process but do not describe its lifecycle.
+    if [ "$AGENT" = "claude" ]; then
+        native_agent_id=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
+        [ -z "$native_agent_id" ] || { debug "$event: Claude subagent $native_agent_id not reported"; exit 0; }
+    fi
+
+    start_stamp=$(ps -o lstart= -p "$AGENT_PID" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$start_stamp" ] || { debug "$event: no process start stamp for $AGENT_PID; using legacy report"; generation=""; }
+fi
+
+if [ -n "$generation" ] && [ -n "$AGENT_PID" ]; then
+    run_id="$AGENT_PID:$start_stamp"
+    case "$AGENT" in
+        claude) home="${CLAUDE_CONFIG_DIR:-}" ;;
+        codex)  home="${CODEX_HOME:-}" ;;
+        *)      exit 0 ;;
+    esac
+
+    body=$(printf '%s' "$input" | jq -c \
+        --arg session "$session" --arg pane "$pane" --arg generation "$generation" \
+        --arg agent "$AGENT" --arg run_id "$run_id" --argjson pid "$AGENT_PID" --arg home "$home" '
+        {cmd: "harness-event", version: 1, session: $session, pane: $pane,
+         generation: $generation, agent: $agent, run_id: $run_id, pid: $pid,
+         event: .hook_event_name}
+        + (if (.session_id | type) == "string" and .session_id != "" then {agent_session_id: .session_id} else {} end)
+        + (if $home != "" then {agent_home: $home} else {} end)
+        + ((if (.prompt | type) == "string" then .prompt elif (.query | type) == "string" then .query else null end) as $q
+           | if $q != null then {prompt: $q[0:200]} else {} end)
+        + (if (.turn_id | type) == "string" or (.turn_id | type) == "number" then {turn_id: (.turn_id | tostring)} else {} end)
+        + ((.tool_use_id // .toolCallId // .tool_call_id // null) as $r
+           | if ($r | type) == "string" and $r != "" then {request_id: $r} else {} end)
+        + ((.tool_name // .toolName // null) as $t
+           | if ($t | type) == "string" and $t != "" then {tool_name: $t} else {} end)
+        + (if (.notification_type | type) == "string" and .notification_type != "" then {notification_type: .notification_type} else {} end)
+        + ((.source // .reason // null) as $s
+           | if ($s | type) == "string" and $s != "" then {source: $s} else {} end)
+        + (if (.message | type) == "string" and .message != "" then {message: .message} else {} end)
+        + (if has("outcome") then {outcome: .outcome} else {} end)
+        + (if (.will_continue | type) == "boolean" then {will_continue: .will_continue} else {} end)
+        + (if (.is_interrupt | type) == "boolean" then {is_interrupt: .is_interrupt} else {} end)
+        ' 2>/dev/null) || exit 0
+    [ -n "$body" ] || exit 0
+
+    reply=$(printf '%s\n' "$body" | nc -U -w 2 "$sock" 2>/dev/null)
+    case "$reply" in
+        *'"ok":true'*) debug "$event: $AGENT run $run_id -> ok" ;;
+        "")            log "$event: no reply from the app at $sock" ;;
+        *)             log "$event: refused: $reply" ;;
+    esac
+    exit 0
 fi
 
 # The harness's configuration home, when its environment names one. Only

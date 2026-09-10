@@ -62,7 +62,13 @@ struct RootView: View {
             }
         }
         .inspector(isPresented: $isDashboardPresented) {
-            AgentDashboardView(store: store)
+            AgentDashboardView(
+                sessions: store.sessions, projects: store.projects, workspaces: store.workspaces,
+                states: store.sessionStates, selectedSessionID: store.selection
+            ) { sessionID, paneID in
+                store.selection = sessionID
+                if let paneID { center.focusPane(paneID) }
+            }
                 .inspectorColumnWidth(min: 300, ideal: 320, max: 340)
         }
         .toolbar {

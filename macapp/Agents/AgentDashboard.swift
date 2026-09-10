@@ -10,6 +10,8 @@ struct AgentDashboardEntry: Identifiable, Equatable {
     /// is: the reducer sets it whenever it sets an activity, and a row whose
     /// timestamp were somehow missing should still be listed, just undated.
     let since: Date?
+    var paneID: UUID? = nil
+    var reason: String? = nil
     var id: String { session.id }
 }
 
@@ -17,6 +19,15 @@ struct AgentDashboardEntry: Identifiable, Equatable {
 /// Foundation-only (like `SessionAttention`) so both can be unit-tested
 /// without a view hierarchy.
 enum AgentDashboard {
+    static func entries(sessions: [SessionRow], states: [String: SessionLifecycleSummary]) -> [AgentDashboardEntry] {
+        let attention = states.mapValues { AttentionState(activity: $0.activity, since: $0.since) }
+        return entries(sessions: sessions, attention: attention).map { entry in
+            var row = entry
+            row.paneID = states[entry.id]?.attentionPane
+            row.reason = states[entry.id]?.reason
+            return row
+        }
+    }
     /// The sessions needing attention, most urgent first: every `.blocked`
     /// session, then every `.yourTurn` session. Within a rank the input
     /// (sidebar) order is preserved. Sessions with no attention state, or

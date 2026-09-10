@@ -6,6 +6,9 @@ import Foundation
 /// times) without any real terminal/process machinery.
 @MainActor
 final class SpyTerminals: SessionTerminating {
+    var onHarnessEvent: ((String, UUID, HarnessEvent) -> PaneLifecycle?)?
+    var onHarnessTitle: ((String, UUID, String) -> Bool)?
+    var onHarnessEnded: ((String, UUID) -> Void)?
     var onProcessExit: ((String) -> Void)?
     /// Tests simulate a terminal reporting an attention signal through
     /// `emitSignal` below, the same way `onProcessExit` simulates process

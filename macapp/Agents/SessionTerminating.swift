@@ -31,6 +31,10 @@ protocol SessionTerminating: AnyObject {
     /// callback-based seam so `AppStore` can be tested against a spy
     /// without any real terminal machinery.
     var onSessionSignal: ((String, UUID, AttentionSignal) -> Void)? { get set }
+    /// Returns the accepted run state, or nil for a stale or unsupported event.
+    var onHarnessEvent: ((String, UUID, HarnessEvent) -> PaneLifecycle?)? { get set }
+    var onHarnessTitle: ((String, UUID, String) -> Bool)? { get set }
+    var onHarnessEnded: ((String, UUID) -> Void)? { get set }
     /// Fired with (sessionID, paneID) whenever one pane's surface is torn
     /// down — pane close, pane process exit, session close, quiesce. This
     /// is what lets `AppStore` drop the closed pane's attention

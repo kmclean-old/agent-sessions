@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+case "$2" in
+    comm=)   printf '/test/claude\n' ;;
+    ppid=)   printf '1\n' ;;
+    lstart=) printf 'Wed Sep 9 10:12:45 2026\n' ;;
+    *)       exit 1 ;;
+esac
