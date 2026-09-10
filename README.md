@@ -298,6 +298,10 @@ Selecting a session clears an indicator raised this way. Without a hook,
 
 ### With the hook, for real agent state
 
+The planned one-time setup in Settings is documented in
+[Harness integration setup](design/harness-integration-setup.md).
+The instructions below cover manual installation.
+
 `hooks/agents-status.sh` sends each native hook event to the app's control
 socket. The app maps those events to lifecycle phases and attention. The hook
 is optional and needs `jq` plus `nc`, which macOS ships.

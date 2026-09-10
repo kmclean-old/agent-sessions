@@ -1,5 +1,8 @@
 # Harness adapters
 
+For the planned app-level installer and settings UI, see
+[Harness integration setup](harness-integration-setup.md).
+
 Agents accepts lifecycle reports from native harness hooks over its control
 socket. A report describes an observed event. The app's adapter for that
 harness decides how the event changes phase and attention. Emitters do not
