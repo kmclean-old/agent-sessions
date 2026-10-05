@@ -84,15 +84,30 @@ enum WorkspacesRoot {
     /// `directory` itself, so callers pass the project's PARENT — the
     /// project is a repository by definition.
     static func isInsideRepository(_ directory: URL) -> Bool {
+        repositoryRoot(containing: directory) != nil
+    }
+
+    /// The nearest repository root at or above `directory` — the first
+    /// directory, walking up, that holds a `.git` entry or a `.jj`
+    /// directory — or nil when nothing above it is a repository. Nearest,
+    /// not outermost, which is what `git rev-parse --show-toplevel` and
+    /// `jj root` answer: a linked worktree or a jj workspace is its own
+    /// root (it carries its own `.git` file or `.jj`), and so is a
+    /// repository nested inside another. That is also the directory a user
+    /// adding the project by hand would pick, which is why `open-session`
+    /// registers an unknown directory's project here (see
+    /// `OpenSessionPlacement`). Lexical: the result is spelled the way
+    /// `directory` was, links and all.
+    static func repositoryRoot(containing directory: URL) -> URL? {
         let fm = FileManager.default
         var cursor = directory.standardizedFileURL
         while true {
             for marker in [".git", ".jj"]
             where fm.fileExists(atPath: cursor.appendingPathComponent(marker).path) {
-                return true
+                return cursor
             }
             let next = cursor.deletingLastPathComponent().standardizedFileURL
-            if next.path == cursor.path { return false }
+            if next.path == cursor.path { return nil }
             cursor = next
         }
     }

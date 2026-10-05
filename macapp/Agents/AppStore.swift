@@ -275,17 +275,23 @@ final class AppStore: ObservableObject {
             restoreProject(path)
             return
         }
-        let project: Project
-        if let existing = projects.first(where: { $0.path == path }) {
-            project = existing
-        } else {
-            project = Project(path: path)
-            projects.append(project)
-            projectLifecycleTokens[path] = UUID()
-        }
-
-        newSession(in: project)
+        newSession(in: registerProject(path))
         save()
+    }
+
+    /// The project at `path`, appended to the sidebar with a fresh
+    /// lifecycle token when it isn't there yet. The one way a project comes
+    /// into being — Add Project and `openSession` both come through here —
+    /// so a project added either way is the same project. Adds no session:
+    /// each caller adds the one it means.
+    private func registerProject(_ path: String) -> Project {
+        if let existing = projects.first(where: { $0.path == path }) {
+            return existing
+        }
+        let project = Project(path: path)
+        projects.append(project)
+        projectLifecycleTokens[path] = UUID()
+        return project
     }
 
     /// Forgets a project wherever it is — active or archived. Every live-side
@@ -371,7 +377,23 @@ final class AppStore: ObservableObject {
     /// the restore is visibly answered; a project archived with no sessions
     /// gets a fresh one, as Add Project would give it.
     func restoreProject(_ path: String) {
-        guard let index = archivedProjects.firstIndex(where: { $0.path == path }) else { return }
+        guard let project = reinstateArchivedProject(path) else { return }
+        if let first = orderedSessions.first(where: { $0.projectPath == project.path }) {
+            selection = first.id
+            save()
+        } else {
+            newSession(in: project)
+        }
+    }
+
+    /// The half of a restore that puts the rows back, without choosing what
+    /// to select: `restoreProject` selects the project's first session (or
+    /// gives it one), while `openSession` is about to add and select its
+    /// own, and a fresh "Session N" beside it would be a shell nobody asked
+    /// for. Does not save; both callers do once they have finished.
+    @discardableResult
+    private func reinstateArchivedProject(_ path: String) -> Project? {
+        guard let index = archivedProjects.firstIndex(where: { $0.path == path }) else { return nil }
         let archived = archivedProjects.remove(at: index)
         let project = archived.project
         projects.append(project)
@@ -382,12 +404,7 @@ final class AppStore: ObservableObject {
         // never, when the archive predates this launch — so reseed from the
         // restored names, or a new session would reuse "Session 1".
         seedSessionCounters(for: orderedTargets.filter { $0.projectPath == project.path })
-        if let first = orderedSessions.first(where: { $0.projectPath == project.path }) {
-            selection = first.id
-            save()
-        } else {
-            newSession(in: project)
-        }
+        return project
     }
 
     // MARK: - Workspace management
@@ -973,8 +990,10 @@ final class AppStore: ObservableObject {
     /// one — selection's target, else the first ordered target, else no-op.
     /// `name`, when non-blank after trimming, is used as-is for the new
     /// row's name. A nil/blank `name` (the default) falls back to today's
-    /// numbered "Session N" naming from `sessionCounters`.
-    func newSession(in target: TargetRef?, name: String? = nil) {
+    /// numbered "Session N" naming from `sessionCounters`. Returns the new
+    /// row's id, or nil when there was no target to put it in.
+    @discardableResult
+    func newSession(in target: TargetRef?, name: String? = nil) -> String? {
         let resolvedTarget: TargetRef?
         if let target {
             resolvedTarget = target
@@ -985,7 +1004,7 @@ final class AppStore: ObservableObject {
         } else {
             resolvedTarget = orderedTargets.first
         }
-        guard let resolvedTarget else { return }
+        guard let resolvedTarget else { return nil }
 
         let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let rowName: String
@@ -1006,6 +1025,7 @@ final class AppStore: ObservableObject {
         sessions.append(row)
         selection = row.id
         save()
+        return row.id
     }
 
     /// Compat shim for existing call sites that still think in terms of
@@ -1028,6 +1048,50 @@ final class AppStore: ObservableObject {
         } else {
             newSession(in: target)
         }
+    }
+
+    /// Opens the session a control-socket `open-session` request asks for
+    /// (see `ControlOpenSession`): a new, selected row in whichever project
+    /// or workspace contains the request's directory — bringing back a
+    /// hidden project, or adding one, when that is what it takes (see
+    /// `OpenSessionPlacement`) — whose pane starts in that directory and
+    /// runs the request's command at its first prompt.
+    ///
+    /// The title, when there is one, is the row's `name`, the same slot a
+    /// named `newSession` fills: what the sidebar shows until the agent
+    /// titles the terminal itself, never a sticky rename. It came from
+    /// another tool, not from the user's own Rename…, and an agent's live
+    /// task name says more than the label it was opened under.
+    ///
+    /// The pane's directory is the request's, which may sit below the
+    /// row's project or workspace root. Only the first pane gets it: a
+    /// split, and the pane spawned after a relaunch, start at the row's
+    /// root like any other session's. The command is handed to the
+    /// terminals here, between creating the row and returning — before the
+    /// view layer can have asked for the row's pane.
+    ///
+    /// Returns the new row's id. Never refuses: every reason to refuse was
+    /// settled before the request got here, and there is always somewhere
+    /// to put the row.
+    @discardableResult
+    func openSession(_ request: ControlOpenSession) -> String {
+        let target: TargetRef
+        switch OpenSessionPlacement.resolve(
+            directory: request.workingDirectory,
+            projects: projects, workspaces: workspaces, hidden: archivedProjects
+        ) {
+        case .target(let existing):
+            target = existing
+        case .hiddenTarget(let parked):
+            reinstateArchivedProject(parked.projectPath)
+            target = parked
+        case .newProject(let path):
+            target = .root(projectPath: registerProject(path).path)
+        }
+        // A target is always given, so a row is always made.
+        let id = newSession(in: target, name: request.title)!
+        terminals.stageLaunch(request.command, workingDirectory: request.workingDirectory, for: id)
+        return id
     }
 
     func closeSession(_ id: String) {

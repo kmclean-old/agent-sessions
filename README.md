@@ -508,3 +508,63 @@ Run your preferred review tool in a separate session or split pane, alongside
 whatever is producing the changes. Use New Session, Split Pane Right, or
 Split Pane Down to open a terminal in the project or workspace directory.
 Feedback and review completion follow the tool's own workflow.
+
+## Opening a session from another tool
+
+Another program on your machine can ask the app to open a session — a
+dashboard's **Attach** button, say, that should land you in an Agents
+terminal rather than Terminal.app. It sends one JSON line to the app's
+control socket, the same socket the status hook reports over, and gets one
+line back:
+
+```json
+{"cmd":"open-session","version":1,"cwd":"/Users/you/code/app","command":"claude-seeq attach 7ea9eb92","title":"Fix the parser"}
+```
+
+The reply is `{"ok":true}` once the session exists, or
+`{"ok":false,"error":"…"}` saying what to fix. It never waits on the command
+itself.
+
+- `cwd` must be an absolute path to a directory that exists.
+- `command` is one line, at most 4096 characters, with no control
+  characters — no newlines, tabs, or escapes. It is typed into a shell, and
+  any of those would make it run something other than the line you sent.
+- `title` is optional: the session's name in the sidebar until the agent
+  titles its terminal, as a fresh session's "Session N" would be.
+- `version` is 1. Anything else is refused, so a sender written against a
+  later form finds out at once rather than half-working.
+
+The session goes where you would have put it by hand: into the deepest
+project or workspace whose directory contains `cwd`. A hidden project that
+contains it comes back to the sidebar first, as adding its directory would
+bring it back. When nothing contains it, the app adds a project for it —
+at its git or jj repository root, or at `cwd` itself outside any
+repository — with the new session as its only one. Either way the new
+session is selected and the app comes to the front.
+
+The pane is an ordinary login shell started in `cwd`, with the same
+environment as any other pane, so the status hook works for whatever runs
+there. Once the shell reaches its prompt, the app types `command` and
+presses Enter, just as the resume hint is typed after a relaunch, but this
+time run, since running it is what you asked for. Typed rather than spawned
+because only your own shell has your `PATH`, functions, and aliases, which
+is usually where a tool like this lives. When the command exits (you
+detach, say), the pane is back at that shell's prompt. Splits, and the pane
+a relaunch brings back, start at the session's project or workspace root
+like any other, and nothing is run again.
+
+The socket lives at
+`~/Library/Application Support/Agents/<bundle id>.control.<pid>.sock`:
+`com.kirahowe.agents` for the release app, `com.kirahowe.agents.dev` for a
+Debug build. The pid in the name keeps two running copies apart; the app
+removes dead sockets when it starts, so normally the one match is the
+running app. Inside an Agents pane, `$AGENTS_CONTROL_SOCK` already names it.
+
+```sh
+sock=$(ls "$HOME/Library/Application Support/Agents/"com.kirahowe.agents.control.*.sock | head -n 1)
+printf '%s\n' '{"cmd":"open-session","version":1,"cwd":"/Users/you/code/app","command":"claude-seeq attach 7ea9eb92","title":"Fix the parser"}' \
+  | nc -U -w 2 "$sock"
+```
+
+The socket is readable and writable only by you. It gives a program
+nothing it couldn't already do itself: running a command as you.

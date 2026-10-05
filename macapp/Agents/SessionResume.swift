@@ -338,7 +338,10 @@ extension SessionResumeMetadata {
 
 /// Collapses human-readable whitespace to one space and drops all other
 /// control scalars (including ESC/BEL/Ctrl-C), producing one printable line.
-private func terminalSafeSingleLine(_ value: String) -> String {
+/// Internal rather than private because the control socket's `open-session`
+/// title (see `ControlServer.decideOpenSession`) is held to the same rule:
+/// it becomes a sidebar label and a window title, never a second line.
+func terminalSafeSingleLine(_ value: String) -> String {
     var result = ""
     var pendingSpace = false
     for scalar in value.unicodeScalars {

@@ -65,6 +65,26 @@ struct AgentsApp: App {
         return center.handleControlSessionEvent(event)
     }
 
+    /// Brings the app, and its one window, in front of whatever the user
+    /// was using — for an `open-session` request, which typically comes
+    /// from a click in a browser. `NSApp.activate()` is the cooperative
+    /// form macOS 14 introduced; the window is also deminiaturized and
+    /// ordered front, since an active app whose window is in the Dock shows
+    /// nothing. The window is found by its scene id (see `body`), falling
+    /// back to whichever window can be main. A window the user closed is
+    /// not reopened here — it is gone, and only the scene can recreate it —
+    /// so the session waits, selected, for the Dock icon's click.
+    @MainActor
+    static func bringMainWindowForward() {
+        NSApp.activate()
+        let window = NSApp.windows.first { $0.identifier?.rawValue == "main" }
+            ?? NSApp.windows.first { $0.canBecomeMain }
+        if window?.isMiniaturized == true {
+            window?.deminiaturize(nil)
+        }
+        window?.makeKeyAndOrderFront(nil)
+    }
+
     init() {
         let center = TerminalCenter()
         self.center = center
@@ -100,6 +120,15 @@ struct AgentsApp: App {
         controlServer.applyHarnessEvent = { [weak center] event in
             guard let center else { return "app is shutting down" }
             return center.handleControlHarnessEvent(event)
+        }
+        // Another tool asking for a session (see `ControlOpenSession`): the
+        // row is made and selected, then the app comes forward so the click
+        // that sent the request lands the user in it.
+        controlServer.openSession = { [weak store] request in
+            guard let store else { return "app is shutting down" }
+            store.openSession(request)
+            Self.bringMainWindowForward()
+            return nil
         }
 
         let uiState = UIState()

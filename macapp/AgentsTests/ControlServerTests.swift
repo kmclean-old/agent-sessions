@@ -207,6 +207,169 @@ final class ControlServerTests: XCTestCase {
         )
     }
 
+    // MARK: - open-session
+
+    /// The directories these tests treat as existing. `decide` is handed
+    /// this instead of the file system, so each refusal is about the field
+    /// under test and nothing else.
+    private static let existing: Set<String> = ["/Users/kira/code/agents", "/tmp"]
+    private func decideOpen(_ line: String) -> ControlServer.RequestDecision {
+        ControlServer.decide(line: line, isDirectory: { Self.existing.contains($0) })
+    }
+
+    func testOpenSessionIsAcceptedWithEveryFieldNormalized() {
+        XCTAssertEqual(
+            decideOpen(
+                #"{"cmd":"open-session","version":1,"cwd":"/Users/kira/code/agents/./","command":"  claude-seeq attach 7ea9eb92 ","title":"Fix the\nparser"}"#
+            ),
+            .openSession(ControlOpenSession(
+                workingDirectory: "/Users/kira/code/agents",
+                command: "claude-seeq attach 7ea9eb92",
+                title: "Fix the parser"
+            )),
+            "cwd is standardized, the command trimmed, and the title collapsed to the one line a sidebar label can show"
+        )
+    }
+
+    func testOpenSessionTitleIsOptionalAndABlankOneIsNone() {
+        let expected = ControlServer.RequestDecision.openSession(
+            ControlOpenSession(workingDirectory: "/tmp", command: "ls", title: nil)
+        )
+        XCTAssertEqual(decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"ls"}"#), expected)
+        XCTAssertEqual(decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"ls","title":null}"#), expected)
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"ls","title":" \t "}"#), expected,
+            "a blank title would name the row nothing; the row keeps its numbered name instead"
+        )
+    }
+
+    func testOpenSessionTitleIsCappedRatherThanRefused() {
+        let long = String(repeating: "x", count: ControlServer.openSessionTitleLimit + 50)
+        guard case .openSession(let request) = decideOpen(
+            #"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"ls","title":"\#(long)"}"#
+        ) else {
+            return XCTFail("a long title is only a long label — it must not refuse the session")
+        }
+        XCTAssertEqual(request.title?.count, ControlServer.openSessionTitleLimit)
+    }
+
+    func testOpenSessionRefusesAnyVersionButOne() {
+        for version in [#""#, #","version":0"#, #","version":2"#] {
+            XCTAssertEqual(
+                decideOpen(#"{"cmd":"open-session"\#(version),"cwd":"/tmp","command":"ls"}"#),
+                .refuse("unsupported open-session version — this app speaks version 1"),
+                "version clause: \(version)"
+            )
+        }
+    }
+
+    func testOpenSessionRefusesACwdThatIsMissingRelativeOrNotADirectory() {
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"command":"ls"}"#),
+            .refuse("open-session requires cwd, the directory to open the session in")
+        )
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"","command":"ls"}"#),
+            .refuse("open-session requires cwd, the directory to open the session in")
+        )
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"code/agents","command":"ls"}"#),
+            .refuse("cwd must be an absolute path: code/agents"),
+            "a relative path is relative to whatever the app's own directory happens to be — never what the sender meant"
+        )
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/Users/kira/gone/","command":"ls"}"#),
+            .refuse("cwd is not an existing directory: /Users/kira/gone")
+        )
+    }
+
+    func testOpenSessionRefusesACommandThatIsMissingBlankOrTooLong() {
+        let required = ControlServer.RequestDecision.refuse(
+            "open-session requires command, the shell command to run in the new session"
+        )
+        XCTAssertEqual(decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp"}"#), required)
+        XCTAssertEqual(decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"   "}"#), required)
+
+        let limit = ControlServer.openSessionCommandLimit
+        let atLimit = String(repeating: "x", count: limit)
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"\#(atLimit)"}"#),
+            .openSession(ControlOpenSession(workingDirectory: "/tmp", command: atLimit, title: nil))
+        )
+        XCTAssertEqual(
+            decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"\#(atLimit)x"}"#),
+            .refuse("command is longer than \(limit) characters")
+        )
+    }
+
+    /// The command is typed at a prompt as a paste, so a control character
+    /// in it is never inert: each of these would make the pane run
+    /// something other than the one line that was asked for.
+    func testOpenSessionRefusesACommandCarryingControlCharacters() {
+        for (escaped, why) in [
+            (#"ls\nrm -rf ~"#, "a newline makes it two commands"),
+            (#"ls\rpwd"#, "a carriage return is Enter"),
+            (#"ls\u001b[201~pwd"#, "an escape can close the bracketed paste early"),
+            (#"ls\u0003"#, "Ctrl-C"),
+            (#"ls\tpwd"#, "a tab completes, it isn't typed"),
+        ] {
+            XCTAssertEqual(
+                decideOpen(#"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"\#(escaped)"}"#),
+                .refuse("command must be a single line with no control characters"),
+                why
+            )
+        }
+    }
+
+    /// The whole path a sender takes: a real `ControlServer` on a private
+    /// socket, `nc -U` speaking the README's own example, and the wired
+    /// callback receiving the decoded request — then the same with nothing
+    /// wired, which must still answer, and close, rather than leave the
+    /// sender's `nc` waiting.
+    @MainActor
+    func testOpenSessionIsAnsweredOverTheSocket() async throws {
+        let socketPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agents-open-test-\(getpid()).sock").path
+        let server = ControlServer(socketPath: socketPath)
+        var opened: [ControlOpenSession] = []
+        server.openSession = { request in
+            opened.append(request)
+            return nil
+        }
+        server.start()
+        defer { server.stop() }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: socketPath) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath), "the server never bound its socket")
+
+        let line = #"{"cmd":"open-session","version":1,"cwd":"/tmp","command":"claude-seeq attach 7ea9eb92","title":"Attach"}"#
+        let accepted = try await Self.run(
+            "/usr/bin/nc", ["-U", "-w", "2", socketPath], environment: [:], stdin: line + "\n"
+        )
+        XCTAssertEqual(accepted.output.trimmingCharacters(in: .whitespacesAndNewlines), #"{"ok":true}"#)
+        XCTAssertEqual(
+            opened,
+            [ControlOpenSession(workingDirectory: "/tmp", command: "claude-seeq attach 7ea9eb92", title: "Attach")]
+        )
+
+        let refused = try await Self.run(
+            "/usr/bin/nc", ["-U", "-w", "2", socketPath], environment: [:],
+            stdin: #"{"cmd":"open-session","version":1,"cwd":"tmp","command":"ls"}"# + "\n"
+        )
+        XCTAssertTrue(
+            refused.output.contains(#""ok":false"#) && refused.output.contains("absolute"),
+            "a refusal reaches the sender as a JSON line saying what to fix, got: \(refused.output)"
+        )
+        XCTAssertEqual(opened.count, 1, "a refused request opens nothing")
+
+        server.openSession = nil
+        let unwired = try await Self.run(
+            "/usr/bin/nc", ["-U", "-w", "2", socketPath], environment: [:], stdin: line + "\n"
+        )
+        XCTAssertTrue(unwired.output.contains("open-session is not wired"), "got: \(unwired.output)")
+    }
+
     func testControlSocketPathIsScopedToTheBundleAndProcess() {
         let path = ControlServer.socketPath
         let bundleID = Bundle(for: ControlServerTests.self).bundleIdentifier

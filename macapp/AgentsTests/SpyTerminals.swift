@@ -23,6 +23,9 @@ final class SpyTerminals: SessionTerminating {
     private(set) var closedIDs: [String] = []
     private(set) var quiesceCalls: [Set<String>] = []
     private(set) var resumeCalls: [Set<String>] = []
+    /// Every `stageLaunch` call, in order — what an `open-session` asked
+    /// the session's first pane to run, and where.
+    private(set) var stagedLaunches: [(sessionID: String, command: String, workingDirectory: String)] = []
     var onCloseSession: ((String) -> Void)?
     var quiesceSessionsHandler: ((Set<String>) async -> Void)?
 
@@ -80,6 +83,10 @@ final class SpyTerminals: SessionTerminating {
     func closeSession(_ id: String) {
         onCloseSession?(id)
         closedIDs.append(id)
+    }
+
+    func stageLaunch(_ command: String, workingDirectory: String, for sessionID: String) {
+        stagedLaunches.append((sessionID, command, workingDirectory))
     }
 
     func quiesceSessions(_ ids: Set<String>) async {

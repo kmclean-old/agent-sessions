@@ -14,6 +14,13 @@ import Foundation
 /// report. A socket line is never throttled, never deduplicated, needs no
 /// pty discovery, and gets an answer.
 ///
+/// It also takes one request from outside any pane: `open-session`, which
+/// asks the app to open a new session in a directory and run a command in
+/// it (see `ControlOpenSession`). That is how another local tool — a
+/// dashboard's "Attach" button, say — lands the user in an Agents terminal
+/// instead of Terminal.app, without the app knowing anything about that
+/// tool.
+///
 /// The socket path carries the bundle id, so each build gets its own endpoint,
 /// AND the pid of the process that bound it, so two launches of the same
 /// binary can never contend for one endpoint either — including a test-host
@@ -94,9 +101,14 @@ final class ControlServer: @unchecked Sendable {
         let willContinue: Bool?
         let isInterrupt: Bool?
         let sequence: UInt64?
+        /// `open-session`'s three fields: where to open the session, what
+        /// to run in it, and an optional label for its sidebar row.
+        let cwd: String?
+        let command: String?
+        let title: String?
 
         private enum CodingKeys: String, CodingKey {
-            case cmd, session, pane, event, status, agent, prompt
+            case cmd, session, pane, event, status, agent, prompt, cwd, command, title
             case agentSessionID = "agent_session_id"
             case agentHome = "agent_home"
             case version, generation, pid, message, outcome, source, sequence
@@ -118,17 +130,97 @@ final class ControlServer: @unchecked Sendable {
         case refuse(String)
         case sessionEvent(ControlSessionEvent)
         case harnessEvent(ControlHarnessEvent)
+        case openSession(ControlOpenSession)
     }
 
-    static func decide(line: String) -> RequestDecision {
+    /// `isDirectory` answers whether a path names an existing directory —
+    /// the one fact about the outside world an `open-session` request is
+    /// checked against before it is accepted. Injectable so the rule can be
+    /// pinned without arranging directories on disk; the app uses the real
+    /// file system.
+    static func decide(
+        line: String,
+        isDirectory: (String) -> Bool = ControlServer.isExistingDirectory
+    ) -> RequestDecision {
         guard let request = try? JSONDecoder().decode(Request.self, from: Data(line.utf8)) else {
             return .refuse("malformed request")
         }
         switch request.cmd {
         case "session-event": return decideSessionEvent(request)
         case "harness-event": return decideHarnessEvent(request)
+        case "open-session": return decideOpenSession(request, isDirectory: isDirectory)
         default: return .refuse("unknown cmd: \(request.cmd)")
         }
+    }
+
+    static func isExistingDirectory(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    /// The longest `command` an `open-session` request may carry, in
+    /// characters. Generous for any real invocation — `claude-seeq attach
+    /// <id>` is two dozen — while keeping a runaway caller from typing a
+    /// novel into somebody's prompt.
+    static let openSessionCommandLimit = 4096
+
+    /// How much of an `open-session` title survives as the sidebar label.
+    /// The same bound the prompt preview gets (see `AgentSessionEvent.make`):
+    /// enough for a sentence, short enough to stay a label.
+    static let openSessionTitleLimit = 200
+
+    /// `open-session` is not a hook report: nothing in it names a pane or a
+    /// session, because the session doesn't exist yet. The checks here are
+    /// everything that can be known without the main actor — the version,
+    /// that `cwd` is an absolute path to a directory that exists, and that
+    /// `command` is one non-empty line. Like the hook's refusals, each
+    /// message says what to fix; unlike the hook, the sender here is a tool
+    /// that reads the reply, so they are worded for the person who wrote it.
+    ///
+    /// `command` is refused outright, rather than cleaned up, if it carries
+    /// any control character. It is typed at the new pane's prompt as a
+    /// paste (see `TerminalCenter.stageLaunch`), and a paste is where a
+    /// control character does damage: a newline turns one command into
+    /// several, and an escape can close the bracketed paste early and have
+    /// the rest of the line read as keystrokes. Quietly stripping them would
+    /// run a different command from the one asked for. The title is only a
+    /// label, so it is cleaned up instead — collapsed to one printable line
+    /// and capped — and a blank one is no title at all.
+    private static func decideOpenSession(
+        _ request: Request, isDirectory: (String) -> Bool
+    ) -> RequestDecision {
+        guard request.version == 1 else {
+            return .refuse("unsupported open-session version — this app speaks version 1")
+        }
+        guard let rawDirectory = request.cwd, !rawDirectory.isEmpty else {
+            return .refuse("open-session requires cwd, the directory to open the session in")
+        }
+        guard rawDirectory.hasPrefix("/") else {
+            return .refuse("cwd must be an absolute path: \(rawDirectory)")
+        }
+        // Lexical clean-up only — a trailing slash or a `..` — so the row
+        // and the pane both see the directory the caller named, links and
+        // all; containment against registered projects resolves links
+        // separately (see `OpenSessionPlacement`).
+        let directory = URL(fileURLWithPath: rawDirectory).standardizedFileURL.path
+        guard isDirectory(directory) else {
+            return .refuse("cwd is not an existing directory: \(directory)")
+        }
+        let command = (request.command ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            return .refuse("open-session requires command, the shell command to run in the new session")
+        }
+        guard command.count <= openSessionCommandLimit else {
+            return .refuse("command is longer than \(openSessionCommandLimit) characters")
+        }
+        guard !command.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return .refuse("command must be a single line with no control characters")
+        }
+        let title = request.title.flatMap { title -> String? in
+            let line = String(terminalSafeSingleLine(title).prefix(openSessionTitleLimit))
+            return line.isEmpty ? nil : line
+        }
+        return .openSession(ControlOpenSession(workingDirectory: directory, command: command, title: title))
     }
 
     private static func decideHarnessEvent(_ request: Request) -> RequestDecision {
@@ -235,6 +327,15 @@ final class ControlServer: @unchecked Sendable {
     @MainActor var applySessionEvent: ((ControlSessionEvent) -> String?)?
     @MainActor var applyHarnessEvent: ((ControlHarnessEvent) -> String?)?
 
+    /// Opens the session an accepted `open-session` request asks for and
+    /// returns nil, or returns why it can't. Wired by `AgentsApp` to
+    /// `AppStore.openSession` plus bringing the window forward; unwired
+    /// means refused, like the hook's two callbacks. It must return as soon
+    /// as the row exists — the caller is waiting on the reply, and the
+    /// command itself is typed later, once the pane's shell is at its
+    /// prompt (see `TerminalCenter.stageLaunch`).
+    @MainActor var openSession: ((ControlOpenSession) -> String?)?
+
     init(socketPath: String = ControlServer.socketPath) {
         self.path = socketPath
     }
@@ -321,7 +422,10 @@ final class ControlServer: @unchecked Sendable {
         }
 
         // Owner-only: reports can alter a session's attention state and
-        // resume metadata, so other users on the machine must not reach it.
+        // resume metadata, and `open-session` runs a command in a new
+        // terminal, so other users on the machine must not reach it. For
+        // the owner it grants nothing new — anything that can connect can
+        // already run that command itself.
         chmod(path, S_IRUSR | S_IWUSR)
 
         guard listen(fd, 8) == 0 else {
@@ -438,6 +542,16 @@ final class ControlServer: @unchecked Sendable {
                 let error = apply(event)
                 self.reply(to: client, ok: error == nil, error: error)
             }
+        case .openSession(let request):
+            Task { @MainActor [weak self] in
+                guard let self else { close(client); return }
+                guard let open = self.openSession else {
+                    self.reply(to: client, ok: false, error: "open-session is not wired")
+                    return
+                }
+                let error = open(request)
+                self.reply(to: client, ok: error == nil, error: error)
+            }
         }
     }
 
@@ -495,6 +609,20 @@ final class ControlServer: @unchecked Sendable {
         }
         return String(decoding: bytes, as: UTF8.self)
     }
+}
+
+/// An accepted `open-session` request: open a new session at
+/// `workingDirectory` — in whichever project or workspace contains it (see
+/// `OpenSessionPlacement`) — and run `command` there, labelling the row
+/// `title` when one was given. Every field has already passed
+/// `ControlServer.decideOpenSession`: the directory is absolute,
+/// standardized and existed when the request arrived; the command is one
+/// non-empty line with no control characters; the title, if any, is one
+/// printable line.
+struct ControlOpenSession: Equatable {
+    let workingDirectory: String
+    let command: String
+    let title: String?
 }
 
 struct ControlHarnessEvent: Equatable {

@@ -271,6 +271,108 @@ final class TerminalCenterTests: XCTestCase {
         )
     }
 
+    // MARK: - Opened sessions
+
+    /// An `open-session` pane: an ordinary login shell — no spawn command,
+    /// the hook's whole environment — in the directory asked for, with the
+    /// command typed once its shell is ready and Enter pressed after it,
+    /// exactly once.
+    func testAnOpenedSessionRunsItsCommandOnceAtItsFirstPrompt() async {
+        var delivered: [String] = []
+        let center = TerminalCenter(
+            textDelivery: { _, text in delivered.append(text) },
+            enterDelivery: { _ in delivered.append("⏎") },
+            promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/zsh"
+        )
+        center.stageLaunch("claude-seeq attach 7ea9eb92", workingDirectory: "/tmp/below-root", for: "opened")
+
+        let view = center.terminalView(for: "opened", workingDirectory: "/tmp", restoredResume: nil)!
+        let initialPane = center.layouts["opened"]!.initialPane
+        XCTAssertNil(
+            view.configuration.command,
+            "the command runs IN the login shell, not instead of it — so it has the user's PATH, and the pane is back at the prompt when it exits"
+        )
+        XCTAssertEqual(view.configuration.workingDirectory, "/tmp/below-root", "the request's directory, not the row's root")
+        XCTAssertEqual(
+            view.configuration.envVars,
+            TerminalCenter.sessionEnvVars(
+                for: "opened", paneID: initialPane, generation: center.paneGeneration(initialPane)
+            ),
+            "the attached agent's hook must find the app exactly as in any other pane"
+        )
+
+        let host = NSView()
+        host.addSubview(view)
+        center.showResumeHintIfNeeded(for: "opened")
+        XCTAssertTrue(delivered.isEmpty, "nothing is typed before the surface — and its pty — exist")
+
+        center.handleSurfaceAttached(paneID: initialPane)
+        await drainMainQueue()
+        XCTAssertEqual(delivered, ["claude-seeq attach 7ea9eb92", "⏎"])
+
+        center.showResumeHintIfNeeded(for: "opened")
+        center.handleTitleChange(paneID: initialPane, title: "kira@Mac:/tmp/below-root")
+        await drainMainQueue()
+        XCTAssertEqual(delivered.count, 2, "run once, however many times the view asks")
+
+        let split = center.splitPane(in: "opened", axis: .horizontal, workingDirectory: "/tmp")!
+        XCTAssertEqual(
+            center.view(forPane: split)?.configuration.workingDirectory, "/tmp",
+            "a split is an ordinary shell at the row's root"
+        )
+    }
+
+    func testAQuiescedOpenedSessionComesBackAsAPlainShell() async {
+        var delivered: [String] = []
+        let center = TerminalCenter(
+            textDelivery: { _, text in delivered.append(text) },
+            enterDelivery: { _ in delivered.append("⏎") },
+            promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/zsh"
+        )
+        center.stageLaunch("claude-seeq attach 7ea9eb92", workingDirectory: "/tmp", for: "opened")
+        let host = NSView()
+        let view = center.terminalView(for: "opened", workingDirectory: "/tmp", restoredResume: nil)!
+        host.addSubview(view)
+        let initialPane = center.layouts["opened"]!.initialPane
+        center.handleSurfaceAttached(paneID: initialPane)
+        center.showResumeHintIfNeeded(for: "opened")
+        await drainMainQueue()
+        XCTAssertEqual(delivered, ["claude-seeq attach 7ea9eb92", "⏎"])
+
+        await center.quiesceSessions(["opened"])
+        center.resumeSessions(["opened"])
+        let recreated = center.terminalView(for: "opened", workingDirectory: "/tmp", restoredResume: nil)!
+        host.addSubview(recreated)
+        center.handleSurfaceAttached(paneID: initialPane)
+        center.showResumeHintIfNeeded(for: "opened")
+        await drainMainQueue()
+
+        XCTAssertEqual(
+            delivered.count, 2,
+            "the command ran in the process the quiesce stopped — running it again unasked would be a new action nobody took"
+        )
+    }
+
+    func testALaunchStagedTooLateOrForAClosedSessionDoesNothing() {
+        let center = TerminalCenter(promptSettleDelay: 0, promptFallbackDelay: 0, loginShell: "/bin/zsh")
+        _ = center.terminalView(for: "live", workingDirectory: "/tmp", restoredResume: nil)
+        center.stageLaunch("ls", workingDirectory: "/var", for: "live")
+        center.closeSession("live")
+        XCTAssertEqual(
+            center.terminalView(for: "live", workingDirectory: "/tmp", restoredResume: nil)?.configuration.workingDirectory,
+            "/tmp",
+            "a session that already had its first pane is past the launch; staging for it leaves nothing behind"
+        )
+
+        center.stageLaunch("ls", workingDirectory: "/var", for: "closed")
+        center.closeSession("closed")
+        XCTAssertEqual(
+            center.terminalView(for: "closed", workingDirectory: "/tmp", restoredResume: nil)?.configuration.workingDirectory,
+            "/tmp",
+            "closing a session drops what was staged for it"
+        )
+    }
+
     private func drainMainQueue() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async {

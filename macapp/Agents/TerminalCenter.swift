@@ -29,19 +29,32 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         var readiness = TerminalReadiness()
     }
 
-    /// Per-session resume-hint bookkeeping. Session-scoped, not pane-scoped:
-    /// the hint prints once per restored session, and only ever into the
-    /// session's initial pane (see `SessionPaneLayout.initialPane`).
+    /// Per-session bookkeeping for the one line typed into a session's
+    /// initial pane once it is ready (see `SessionPaneLayout.initialPane`):
+    /// a restored session's resume command, offered and left waiting, or an
+    /// opened session's command (`launchCommand`, see `stageLaunch`), typed
+    /// and run. Session-scoped, not pane-scoped: either is typed once per
+    /// session, and only ever into the initial pane. A session has one or
+    /// the other — an opened session is brand new, with nothing to resume.
     private struct ResumeHintState {
         var metadata: SessionResumeMetadata?
+        var launchCommand: String? = nil
         var scheduled = false
         var didShow = false
+    }
+
+    /// What an `open-session` asked a session's first pane to do, held from
+    /// `stageLaunch` until `ensureSession` creates that pane.
+    private struct PendingLaunch {
+        let command: String
+        let workingDirectory: String
     }
 
     private var panes: [UUID: PaneEntry] = [:]
     private var harnessRuns: [UUID: String] = [:]
     private var harnessObservations: [UUID: HarnessProcessObservation] = [:]
     private var resumeHints: [String: ResumeHintState] = [:]
+    private var pendingLaunches: [String: PendingLaunch] = [:]
 
     /// Who owns each session's current resume record. Distinct from the
     /// resume DESIGNATE (who may author next): while the author lives, only
@@ -69,6 +82,12 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     @Published private(set) var quiescedSessionIDs: Set<String> = []
 
     private let textDelivery: @MainActor (TerminalView, String) -> Void
+    /// Presses Enter in a pane — the half of running an opened session's
+    /// command that `textDelivery` can't do: typed text is a paste, and a
+    /// pasted newline under bracketed paste is a second line in the shell's
+    /// editor, not Enter (see `TerminalKeyPress`). Injectable alongside
+    /// `textDelivery` so tests see the keypress.
+    private let enterDelivery: @MainActor (TerminalView) -> Void
     /// How long after the first prompt signal to wait before typing — the
     /// title arrives from precmd, a moment before the line editor takes the
     /// tty into raw mode, and bytes landing in that gap are echoed twice.
@@ -93,11 +112,17 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
                 NSLog("Agents: dropped typed text — the pane has no surface")
             }
         },
+        enterDelivery: @escaping @MainActor (TerminalView) -> Void = { view in
+            if !view.sendKey(.enter) {
+                NSLog("Agents: dropped Enter — the pane has no surface")
+            }
+        },
         promptSettleDelay: TimeInterval = 0.1,
         promptFallbackDelay: TimeInterval = 3.0,
         loginShell: String = TerminalCenter.userLoginShell
     ) {
         self.textDelivery = textDelivery
+        self.enterDelivery = enterDelivery
         self.promptSettleDelay = promptSettleDelay
         self.promptFallbackDelay = promptFallbackDelay
         self.loginShell = loginShell
@@ -311,6 +336,17 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
 
         let paneID = UUID()
         layouts[sessionID] = SessionPaneLayout(initialPane: paneID)
+        if let launch = pendingLaunches.removeValue(forKey: sessionID) {
+            // An opened session: a plain login shell in the directory the
+            // request named, with its command typed at the first prompt —
+            // see `stageLaunch`. It is brand new, so there is no record to
+            // offer, and no heading to print.
+            resumeHints[sessionID] = ResumeHintState(metadata: nil, launchCommand: launch.command)
+            panes[paneID] = makePane(
+                sessionID: sessionID, paneID: paneID, workingDirectory: launch.workingDirectory
+            )
+            return true
+        }
         resumeHints[sessionID] = ResumeHintState(metadata: restoredResume)
         if restoredResume != nil {
             // A restored row carries a persisted record authored by a
@@ -323,6 +359,42 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             command: restoreCommand
         )
         return true
+    }
+
+    /// Arranges for `sessionID`'s initial pane, when `ensureSession` creates
+    /// it, to start in `workingDirectory` rather than the row's own root,
+    /// and to run `command` once its shell is at the first prompt — the
+    /// pane an `open-session` request asked for (see `AppStore.openSession`).
+    /// A session that already has a pane is past the point this could
+    /// apply, so staging for one does nothing.
+    ///
+    /// The command is TYPED into an ordinary login shell, and Enter pressed
+    /// after it, by the same once-per-session, wait-until-ready delivery
+    /// that types a restored session's resume command (see
+    /// `showResumeHintIfNeeded`). It is not the pane's spawn command, the
+    /// way a restored session's heading is (see
+    /// `SessionResumeMetadata.restoreShellCommand`), though that would also
+    /// leave the pane at the login shell when the command exits. That
+    /// spawn has to run under `zsh -f` to keep Ghostty's shell integration
+    /// for the shell it becomes, so it runs with none of the user's startup
+    /// files: no PATH beyond what the app itself was launched with — from
+    /// the Dock, `/usr/bin:/bin:/usr/sbin:/sbin` — and none of their
+    /// functions or aliases, which is exactly where a tool like
+    /// `claude-seeq` lives. A heading only has to print; this has to run
+    /// the user's own command, and the only place that runs the way the
+    /// user expects is the user's own shell. Typing it there also means
+    /// the shell's integration sees the command start and finish, so a
+    /// detached agent clears its pane's harness state the way it would at
+    /// a hand-typed prompt; the command lands in history; and when it
+    /// exits the pane is simply back at the prompt, where `exit` closes it
+    /// at once rather than holding it open as a spawned command's pane is.
+    ///
+    /// The working directory and the command apply to the initial pane
+    /// only and are not persisted: a split, and the pane spawned after a
+    /// relaunch, are ordinary shells at the row's root.
+    func stageLaunch(_ command: String, workingDirectory: String, for sessionID: String) {
+        guard layouts[sessionID] == nil else { return }
+        pendingLaunches[sessionID] = PendingLaunch(command: command, workingDirectory: workingDirectory)
     }
 
     /// Spawns a fresh pane surface: the user's login shell in
@@ -516,6 +588,10 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// the pane's own spawn printed it before the shell started — see
     /// `SessionResumeMetadata.restoreShellCommand` and `ensureSession`.
     ///
+    /// An opened session's command (see `stageLaunch`) goes the same way,
+    /// with one difference: it is followed by Enter, because opening the
+    /// session was the user asking for it to run.
+    ///
     /// Delivery waits for the pane to be ready for input, which is two
     /// things (see `TerminalReadiness.isReady`): its surface must exist —
     /// the text goes down the pty, and there is no pty until Ghostty has
@@ -528,7 +604,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     /// taken over yet.
     func showResumeHintIfNeeded(for sessionID: String) {
         guard var hint = resumeHints[sessionID],
-              hint.metadata != nil,
+              hint.metadata != nil || hint.launchCommand != nil,
               !hint.scheduled,
               !hint.didShow,
               let layout = layouts[sessionID],
@@ -557,7 +633,6 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
         guard var hint = resumeHints[sessionID],
               hint.scheduled,
               !hint.didShow,
-              let metadata = hint.metadata,
               let layout = layouts[sessionID],
               let entry = panes[layout.initialPane],
               entry.readiness.isReady
@@ -565,6 +640,15 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
 
         hint.didShow = true
         resumeHints[sessionID] = hint
+        if let launch = hint.launchCommand {
+            // Unlike a resume, the user already asked for this to run —
+            // that is what opening the session was — so Enter is pressed.
+            NSLog("Agents: ran opened session's command in session \(sessionID) pane \(layout.initialPane.uuidString)")
+            textDelivery(entry.view, launch)
+            enterDelivery(entry.view)
+            return
+        }
+        guard let metadata = hint.metadata else { return }
         guard let command = SessionResumeMetadata.resumeCommand(for: metadata) else {
             // A harness with no known resume syntax gets only the heading,
             // session id included, and the spawn has already printed that.
@@ -614,6 +698,7 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
     func closeSession(_ sessionID: String) {
         quiescedSessionIDs.remove(sessionID)
         resumeHints.removeValue(forKey: sessionID)
+        pendingLaunches.removeValue(forKey: sessionID)
         resumeAuthorship.removeValue(forKey: sessionID)
         guard let layout = layouts.removeValue(forKey: sessionID) else { return }
         for paneID in layout.paneIDs {
@@ -676,6 +761,12 @@ final class TerminalCenter: ObservableObject, SessionTerminating {
             if var hint = resumeHints[sessionID] {
                 hint.scheduled = false
                 hint.didShow = false
+                // An opened session's command ran in the process that just
+                // died; the shell that follows is an ordinary one. Running
+                // it again unasked — `attach` to an agent, say, after a
+                // refused workspace close — is not the session coming back
+                // but a new action nobody took.
+                hint.launchCommand = nil
                 resumeHints[sessionID] = hint
             }
         }

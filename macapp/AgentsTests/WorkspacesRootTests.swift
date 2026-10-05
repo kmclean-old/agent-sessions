@@ -168,4 +168,36 @@ final class WorkspacesRootTests: XCTestCase {
         XCTAssertTrue(two.hasPrefix("website-"))
         XCTAssertNotEqual(one, two, "same basename, different checkout, different directory")
     }
+
+    // MARK: - repositoryRoot(containing:)
+
+    func test_repositoryRoot_isTheNearestDirectoryHoldingGitOrJJ() throws {
+        let repository = try makeDirectory("code/app")
+        _ = try makeDirectory("code/app/.git")
+        let nested = try makeDirectory("code/app/vendor/lib")
+        _ = try makeDirectory("code/app/vendor/lib/.jj")
+        let deep = try makeDirectory("code/app/src/web")
+
+        XCTAssertEqual(WorkspacesRoot.repositoryRoot(containing: deep)?.path, repository.path)
+        XCTAssertEqual(WorkspacesRoot.repositoryRoot(containing: repository)?.path, repository.path, "a root contains itself")
+        XCTAssertEqual(
+            WorkspacesRoot.repositoryRoot(containing: nested.appendingPathComponent("src"))?.path, nested.path,
+            "the nearest root, not the outermost — a repository inside another is its own"
+        )
+    }
+
+    func test_repositoryRoot_recognisesALinkedWorktreesGitFile() throws {
+        let worktree = try makeDirectory("code/app-feature")
+        try "gitdir: /elsewhere".write(
+            to: worktree.appendingPathComponent(".git"), atomically: true, encoding: .utf8
+        )
+        XCTAssertEqual(
+            WorkspacesRoot.repositoryRoot(containing: try makeDirectory("code/app-feature/src"))?.path,
+            worktree.path
+        )
+    }
+
+    func test_repositoryRoot_isNilOutsideAnyRepository() throws {
+        XCTAssertNil(WorkspacesRoot.repositoryRoot(containing: try makeDirectory("scratch/notes")))
+    }
 }

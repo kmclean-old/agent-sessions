@@ -74,6 +74,13 @@ protocol SessionTerminating: AnyObject {
     /// the label heals on the pane's next `.resume`-role title).
     var onAgentSessionEvent: ((String, AgentSessionEvent, String?) -> Void)? { get set }
     func closeSession(_ id: String)
+    /// Arranges for a session's first pane, when it is created, to start in
+    /// `workingDirectory` and run `command` at its first prompt — what an
+    /// `open-session` request asks for (see `AppStore.openSession` and
+    /// `TerminalCenter.stageLaunch`). Staged rather than run, because the
+    /// pane doesn't exist yet: panes are created lazily, when the view
+    /// layer first shows the row.
+    func stageLaunch(_ command: String, workingDirectory: String, for sessionID: String)
     /// Stops every target terminal and returns only after its Ghostty surface
     /// has been explicitly freed. Session rows remain owned by AppStore.
     func quiesceSessions(_ ids: Set<String>) async
