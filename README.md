@@ -1,5 +1,9 @@
 # Agents
 
+> **Retired.** This was how I work with agents for the middle half of 2026.
+> It has been superseded by [overview](https://github.com/kirahowe/overview).
+> This repo is no longer maintained, and there are no more nightly builds.
+
 A minimal native macOS app: a sidebar organizes terminal sessions under
 project directories, with real [Ghostty](https://ghostty.org)-rendered
 terminals (running your actual login shell) in the detail area.
