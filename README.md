@@ -1,5 +1,6 @@
 # Agents
 
+> [!NOTE]
 > **Retired.** This was how I work with agents for the middle half of 2026.
 > It has been superseded by [overview](https://github.com/kirahowe/overview).
 > This repo is no longer maintained, and there are no more nightly builds.
